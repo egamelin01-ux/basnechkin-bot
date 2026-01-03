@@ -1,0 +1,21 @@
+# secrets
+.env
+service_account.json
+credentials.json
+*.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env/
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+.DS_Store
