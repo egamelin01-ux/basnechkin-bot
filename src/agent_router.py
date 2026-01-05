@@ -1,12 +1,57 @@
 """Agent 1 (OpenAI) - роутер логики и генератор промптов для DeepSeek."""
 import json
 import logging
+import random
 from typing import Dict, Any, Optional
 from openai import OpenAI
 
 from config import OPENAI_API_KEY
 
 logger = logging.getLogger(__name__)
+
+# Список моралей для разных возрастов
+MORALS_BY_AGE = {
+    "3-5": [
+        "Дружба важнее игрушек",
+        "Нужно делиться с друзьями",
+        "Слушаться родителей - это хорошо",
+        "Быть добрым к другим",
+        "Не нужно жадничать",
+        "Помогать другим - это хорошо",
+        "Не нужно драться",
+        "Быть вежливым",
+    ],
+    "6-8": [
+        "Честность - лучшая политика",
+        "Трудолюбие приводит к успеху",
+        "Не суди других по внешности",
+        "Важно быть ответственным",
+        "Упорство помогает достичь цели",
+        "Скромность украшает человека",
+        "Не нужно хвастаться",
+        "Важно уважать старших",
+    ],
+    "9-12": [
+        "Справедливость важнее личной выгоды",
+        "Знания - это сила",
+        "Не нужно завидовать другим",
+        "Важно быть терпеливым",
+        "Самоконтроль - признак зрелости",
+        "Важно уметь прощать",
+        "Не нужно лгать",
+        "Важно быть благодарным",
+    ],
+    "13+": [
+        "Честь и достоинство важнее выгоды",
+        "Мудрость приходит с опытом",
+        "Важно быть верным своим принципам",
+        "Не нужно предавать друзей",
+        "Самопознание - путь к мудрости",
+        "Важно уметь признавать ошибки",
+        "Справедливость превыше всего",
+        "Важно быть милосердным",
+    ],
+}
 
 
 class AgentRouter:
@@ -129,5 +174,118 @@ class AgentRouter:
                 "should_update_profile": False,
                 "profile_patch": {},
                 "deepseek_user_prompt": f"Напиши басню по мотивам Крылова на основе запроса: {user_message}"
+            }
+    
+    def get_random_moral_by_age(self, age: str) -> str:
+        """Получает случайную мораль на основе возраста."""
+        # Определяем возрастную группу
+        age_str = str(age).strip().lower()
+        age_group = None
+        
+        # Пытаемся извлечь число из возраста
+        try:
+            age_num = int(''.join(filter(str.isdigit, age_str)))
+            if age_num <= 5:
+                age_group = "3-5"
+            elif age_num <= 8:
+                age_group = "6-8"
+            elif age_num <= 12:
+                age_group = "9-12"
+            else:
+                age_group = "13+"
+        except:
+            # Если не удалось определить, используем среднюю группу
+            age_group = "6-8"
+        
+        morals = MORALS_BY_AGE.get(age_group, MORALS_BY_AGE["6-8"])
+        return random.choice(morals)
+    
+    def process_story_request(
+        self,
+        request_type: str,
+        user_message: str,
+        user_profile: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Обрабатывает специальные запросы на генерацию басни.
+        
+        request_type может быть:
+        - "new_dilemma": новая дилемма (обновляет context_active)
+        - "random_moral": случайная мораль (не использует context_active)
+        - "previous_moral": прошлая мораль (использует context_active)
+        - "add_traits": дополнить характер (обновляет traits)
+        - "regular": обычный запрос
+        
+        Возвращает:
+        {
+            "request_type": str,
+            "deepseek_user_prompt": "string"
+        }
+        """
+        try:
+            age = user_profile.get('age', '') if user_profile else ''
+            
+            if request_type == "new_dilemma":
+                # Новая дилемма - формируем промпт на основе новой ситуации
+                prompt = f"Напиши басню по мотивам Крылова, которая разбирает следующую ситуацию: {user_message}. " \
+                        f"Басня должна иметь явную мораль в конце, которая помогает ребенку понять, как правильно поступать в такой ситуации."
+                return {
+                    "request_type": "new_dilemma",
+                    "deepseek_user_prompt": prompt
+                }
+            
+            elif request_type == "random_moral":
+                # Случайная мораль - генерируем мораль на основе возраста
+                try:
+                    moral = self.get_random_moral_by_age(age)
+                    prompt = f"Напиши басню по мотивам Крылова со следующей моралью: {moral}. " \
+                            f"Басня должна быть интересной и поучительной, с явной моралью в конце."
+                    logger.info(f"Сгенерирована случайная мораль для возраста {age}: {moral}")
+                    return {
+                        "request_type": "random_moral",
+                        "deepseek_user_prompt": prompt
+                    }
+                except Exception as e:
+                    logger.error(f"Ошибка при генерации случайной морали для возраста {age}: {e}", exc_info=True)
+                    # Возвращаем дефолтную мораль
+                    default_moral = "Дружба важнее игрушек"
+                    prompt = f"Напиши басню по мотивам Крылова со следующей моралью: {default_moral}. " \
+                            f"Басня должна быть интересной и поучительной, с явной моралью в конце."
+                    return {
+                        "request_type": "random_moral",
+                        "deepseek_user_prompt": prompt
+                    }
+            
+            elif request_type == "previous_moral":
+                # Прошлая мораль - используем context_active
+                prompt = f"Напиши басню по мотивам Крылова, которая разбирает следующую ситуацию: {user_message}. " \
+                        f"Басня должна иметь явную мораль в конце, которая помогает ребенку понять, как правильно поступать в такой ситуации."
+                return {
+                    "request_type": "previous_moral",
+                    "deepseek_user_prompt": prompt
+                }
+            
+            elif request_type == "add_traits":
+                # Дополнить характер - просто генерируем обычную басню
+                prompt = "Напиши басню по мотивам Крылова, которая учитывает обновленные черты характера ребенка. " \
+                        f"Басня должна быть интересной и поучительной, с явной моралью в конце."
+                return {
+                    "request_type": "add_traits",
+                    "deepseek_user_prompt": prompt
+                }
+            
+            else:
+                # Обычный запрос
+                prompt = f"Напиши басню по мотивам Крылова на основе запроса: {user_message}"
+                return {
+                    "request_type": "regular",
+                    "deepseek_user_prompt": prompt
+                }
+                
+        except Exception as e:
+            logger.error(f"Ошибка в process_story_request: {e}")
+            return {
+                "request_type": request_type,
+                "deepseek_user_prompt": f"Напиши басню по мотивам Крылова."
             }
 

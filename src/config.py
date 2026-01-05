@@ -3,8 +3,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения
-load_dotenv()
+# Загружаем переменные окружения из .env файла (если он существует)
+# override=False означает, что переменные окружения из системы/контейнера имеют приоритет
+# Это важно для Docker, где переменные передаются через env_file в docker-compose
+load_dotenv(override=False)
 
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
