@@ -1,0 +1,13 @@
+services:
+  basnechkin-bot:
+    build: .
+    container_name: basnechkin-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Монтируем .env для удобства (но он в .dockerignore, так что нужно передать через env_file)
+      - ./logs:/app/logs
+    # База данных остается на AlwaysData, поэтому не добавляем service для БД
+    # DATABASE_URL должен быть в .env и указывать на внешний сервер
+
