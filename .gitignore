@@ -3,6 +3,8 @@
 service_account.json
 credentials.json
 *.json
+.env.local
+.env.*.local
 
 # python
 __pycache__/

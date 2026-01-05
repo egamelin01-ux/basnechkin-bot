@@ -13,7 +13,13 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_BOT_TOKEN
-from sheets import GoogleSheetsClient
+from db.repository import (
+    get_user,
+    upsert_user_profile,
+    update_user_fields,
+    save_story,
+    delete_user_profile,
+)
 from agent_router import AgentRouter
 from deepseek_client import DeepSeekClient
 from utils import AntifloodManager, ProfileCache, split_message
@@ -26,10 +32,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Состояния FSM для анкеты
-ASKING_NAME, ASKING_AGE, ASKING_TRAITS = range(3)
+ASKING_NAME, ASKING_AGE, ASKING_TRAITS, ASKING_SITUATION = range(4)
 
 # Инициализация компонентов
-sheets_client = GoogleSheetsClient()
 agent_router = AgentRouter()
 deepseek_client = DeepSeekClient()
 antiflood = AntifloodManager()
@@ -44,7 +49,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Пользователь {user_id} ({username}) запустил бота")
     
     # Проверяем, есть ли уже профиль
-    profile = sheets_client.get_user_profile(user_id)
+    profile = get_user(user_id)
     if profile:
         # Профиль уже есть, просто приветствуем
         await update.message.reply_text(
@@ -62,7 +67,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "Сейчас я задам вам несколько вопросов про вашего ребенка, "
-        "чтобы в наших баснях главными героями были бы ваши дети."
+        "чтобы в наших баснях главными героями были именно ваши дети."
     )
     
     # Начинаем анкету
@@ -76,7 +81,7 @@ async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     child_names = update.message.text.strip()
     context.user_data['child_names'] = child_names
     
-    await update.message.reply_text("Сколько лет?")
+    await update.message.reply_text("Сколько лет?:)")
     return ASKING_AGE
 
 
@@ -102,8 +107,8 @@ async def handle_traits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     child_names = context.user_data.get('child_names', '')
     age = context.user_data.get('age', '')
     
-    success = sheets_client.create_user_profile(
-        user_id=user_id,
+    success = upsert_user_profile(
+        telegram_id=user_id,
         username=username,
         child_names=child_names,
         age=age,
@@ -119,19 +124,56 @@ async def handle_traits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Инвалидируем кэш
     profile_cache.invalidate(user_id)
     
-    # Отправляем подтверждение
+    # Задаем 4-й вопрос о ситуации
     await update.message.reply_text(
-        "✅ Спасибо! Профиль сохранен. Сейчас я сгенерирую для вас первую басню-знакомство."
+        "Хотите разобрать какую-то реальную ситуацию, связанную с ребёнком?\n\n"
+        "Мы можем добавить в сказку дилемму (например: не любит делиться, дерётся во дворе, не слушается) "
+        "и сделать поучительную басню с моралью именно под эту ситуацию.\n\n"
+        "Если хотите — опишите её своими словами. Если нет — просто напишите \"нет\"."
     )
     
-    # Загружаем профиль для Agent 1
-    profile = sheets_client.get_user_profile(user_id)
-    profile_cache.set(user_id, profile)
+    return ASKING_SITUATION
+
+
+async def handle_situation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ответа на вопрос о ситуации."""
+    user_id = update.effective_user.id
+    answer = update.message.text.strip()
     
-    # Генерируем первую басню автоматически
-    await generate_and_send_story(update, context, "Напиши первую басню-знакомство с ребенком.")
-    
-    return ConversationHandler.END
+    # Проверяем, ответил ли пользователь "нет"
+    if answer.lower() == "нет":
+        # Context не меняется (остается NULL или предыдущий)
+        await update.message.reply_text(
+            "Понятно. Сейчас я напишу для вас первую басню."
+        )
+        # Генерируем обычную басню
+        await generate_and_send_story(update, context, "Напиши первую басню-знакомство с ребенком.")
+        return ConversationHandler.END
+    else:
+        # Сохраняем ситуацию в context_active
+        success = update_user_fields(user_id, context_active=answer)
+        if success:
+            # Инвалидируем кэш
+            profile_cache.invalidate(user_id)
+            updated_profile = get_user(user_id)
+            if updated_profile:
+                profile_cache.set(user_id, updated_profile)
+            
+            await update.message.reply_text(
+                "Отлично! Учту эту ситуацию в басне. Сейчас напишу для вас первую басню с разбором этой ситуации."
+            )
+            # Генерируем басню с учетом ситуации
+            await generate_and_send_story(
+                update, 
+                context, 
+                f"Напиши первую басню-знакомство с ребенком, которая разбирает ситуацию: {answer}"
+            )
+        else:
+            await update.message.reply_text(
+                "Произошла ошибка при сохранении. Попробуйте позже."
+            )
+        
+        return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,7 +187,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     # Проверяем, есть ли профиль
-    profile = sheets_client.get_user_profile(user_id)
+    profile = get_user(user_id)
     if not profile:
         await update.message.reply_text(
             "У вас нет сохраненного профиля. Используйте /start для регистрации."
@@ -153,7 +195,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Удаляем профиль и все басни
-    success = sheets_client.delete_user_profile(user_id)
+    success = delete_user_profile(user_id)
     
     if success:
         # Инвалидируем кэш
@@ -183,7 +225,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем наличие профиля
     profile = profile_cache.get(user_id)
     if not profile:
-        profile = sheets_client.get_user_profile(user_id)
+        profile = get_user(user_id)
         if profile:
             profile_cache.set(user_id, profile)
         else:
@@ -213,14 +255,14 @@ async def generate_and_send_story(
     context: ContextTypes.DEFAULT_TYPE,
     user_message: str
 ):
-    """Генерирует басню и отправляет пользователю."""
+    """Пишет басню и отправляет пользователю."""
     user_id = update.effective_user.id
     
     try:
-        # Загружаем профиль (из кэша или из Sheets)
+        # Загружаем профиль (из кэша или из БД)
         profile = profile_cache.get(user_id)
         if not profile:
-            profile = sheets_client.get_user_profile(user_id)
+            profile = get_user(user_id)
             if profile:
                 profile_cache.set(user_id, profile)
         
@@ -231,7 +273,7 @@ async def generate_and_send_story(
             return
         
         # Отправляем индикатор генерации
-        status_msg = await update.message.reply_text("🔄 Генерирую басню...")
+        status_msg = await update.message.reply_text("✒️ Пишу басню...")
         
         # Вызываем Agent 1
         try:
@@ -248,15 +290,12 @@ async def generate_and_send_story(
         if agent_response.get("should_update_profile", False):
             profile_patch = agent_response.get("profile_patch", {})
             if profile_patch:
-                # Добавляем last_user_message в patch, если его нет
-                if "last_user_message" not in profile_patch:
-                    profile_patch["last_user_message"] = user_message
-                
-                success = sheets_client.update_user_profile(user_id, profile_patch)
+                # Обновляем только существующие поля (last_user_message не используется в новой схеме БД)
+                success = update_user_fields(user_id, **profile_patch)
                 if success:
                     # Инвалидируем кэш и обновляем
                     profile_cache.invalidate(user_id)
-                    updated_profile = sheets_client.get_user_profile(user_id)
+                    updated_profile = get_user(user_id)
                     if updated_profile:
                         profile_cache.set(user_id, updated_profile)
                         profile = updated_profile
@@ -276,6 +315,7 @@ async def generate_and_send_story(
             child_names = profile.get('child_names', '').strip()
             age = profile.get('age', '').strip()
             traits = profile.get('traits', '').strip()
+            context_active = profile.get('context_active', '').strip() if profile.get('context_active') else ''
             
             if child_names:
                 profile_header = f"ГЛАВНЫЕ ГЕРОИ БАСНИ (обязательно используй их в басне):\n"
@@ -284,11 +324,19 @@ async def generate_and_send_story(
                     profile_header += f"- Возраст: {age}\n"
                 if traits:
                     profile_header += f"- Черты характера: {traits}\n"
+                
+                # Добавляем контекст ситуации, если он есть
+                if context_active:
+                    profile_header += f"\nВАЖНО - РЕАЛЬНАЯ СИТУАЦИЯ ДЛЯ РАЗБОРА:\n{context_active}\n"
+                    profile_header += "Басня ОБЯЗАТЕЛЬНО должна разбирать именно эту ситуацию с явной моралью в конце.\n"
+                
                 profile_header += f"\nЗАДАНИЕ: {deepseek_prompt}\n\n"
-                profile_header += "ВАЖНО: Главными героями басни ДОЛЖНЫ быть именно эти дети с указанными именами и чертами характера. Не придумывай других персонажей."
+                profile_header += "ВАЖНО: Главными героями басни ДОЛЖНЫ быть именно эти дети с указанными именами и чертами характера."
                 
                 deepseek_prompt = profile_header
                 logger.info(f"Добавлена информация о детях в промпт: {child_names}")
+                if context_active:
+                    logger.info(f"Добавлен контекст ситуации: {context_active[:100]}...")
         
         logger.info(f"Генерирую басню через DeepSeek для пользователя {user_id}, длина промпта: {len(deepseek_prompt)}")
         story_text = deepseek_client.generate_story(deepseek_prompt)
@@ -302,8 +350,8 @@ async def generate_and_send_story(
         # Удаляем статус-сообщение
         await status_msg.delete()
         
-        # Сохраняем басню в Sheets (trim выполнится автоматически)
-        sheets_client.save_story(user_id, story_text, model='deepseek')
+        # Сохраняем басню в БД (trim выполнится автоматически)
+        save_story(user_id, story_text, model='deepseek')
         
         # Отправляем басню частями, если она длинная
         chunks = split_message(story_text)
@@ -341,6 +389,7 @@ def main():
             ASKING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name)],
             ASKING_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_age)],
             ASKING_TRAITS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_traits)],
+            ASKING_SITUATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_situation)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )

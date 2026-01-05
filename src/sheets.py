@@ -54,7 +54,7 @@ class GoogleSheetsClient:
         Возвращает None, если пользователь не найден.
         """
         try:
-            range_name = 'Users!A2:J'
+            range_name = 'Users!A2:K'
             result = self.service.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
                 range=range_name
@@ -74,7 +74,8 @@ class GoogleSheetsClient:
                         'updated_at': row[6] if len(row) > 6 else '',
                         'last_user_message': row[7] if len(row) > 7 else '',
                         'state': row[8] if len(row) > 8 else '',
-                        'version': row[9] if len(row) > 9 else '1'
+                        'version': row[9] if len(row) > 9 else '1',
+                        'story_total': row[10] if len(row) > 10 else '0'
                     }
             
             return None
@@ -99,12 +100,15 @@ class GoogleSheetsClient:
                 child_names,
                 age,
                 traits,
-                now,  # created_at
-                now,  # updated_at
-                '',   # last_user_message
-                'active',  # state
-                '1'   # version
+                now,
+                now,
+                '',
+                'active',
+                '1'
+                '0' # story_total
             ]]
+
+
             
             body = {'values': values}
             result = self.service.spreadsheets().values().append(
@@ -132,7 +136,7 @@ class GoogleSheetsClient:
         """
         try:
             # Находим строку пользователя
-            range_name = 'Users!A2:J'
+            range_name = 'Users!A2:K'
             result = self.service.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
                 range=range_name
@@ -151,7 +155,7 @@ class GoogleSheetsClient:
                 return False
             
             # Получаем текущий профиль
-            current_range = f'Users!A{row_index}:J{row_index}'
+            current_range = f'Users!A{row_index}:K{row_index}'
             current_result = self.service.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
                 range=current_range
@@ -161,7 +165,7 @@ class GoogleSheetsClient:
             
             # Обновляем значения
             updated_row = list(current_row)
-            while len(updated_row) < 10:
+            while len(updated_row) < 11:
                 updated_row.append('')
             
             # Обновляем поля из patch
@@ -205,7 +209,7 @@ class GoogleSheetsClient:
                 return False
             
             # Находим строку пользователя в Users
-            range_name = 'Users!A2:J'
+            range_name = 'Users!A2:K'
             result = self.service.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
                 range=range_name
@@ -282,7 +286,117 @@ class GoogleSheetsClient:
         except Exception as e:
             logger.error(f"Ошибка удаления профиля пользователя {user_id}: {e}")
             return False
-    
+            def increment_story_total(self, user_id: int) -> int:
+                         """
+        Увеличивает Users.story_total на 1 для пользователя.
+        Колонка story_total = B
+        updated_at = I
+        """
+        try:
+            # Читаем Users (A:P чтобы захватить все поля)
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range='Users!A2:P'
+            ).execute()
+
+            rows = result.get('values', [])
+            row_index = None
+            current_value = 0
+
+            for idx, row in enumerate(rows):
+                if len(row) > 0 and str(row[0]) == str(user_id):
+                    row_index = idx + 2  # строка в Google Sheets
+                    if len(row) > 1 and row[1].strip() != "":
+                        try:
+                            current_value = int(row[1])
+                        except ValueError:
+                            current_value = 0
+                    break
+
+            if row_index is None:
+                logger.warning(f"Пользователь {user_id} не найден для story_total")
+                return 0
+
+            new_value = current_value + 1
+            now = datetime.now().isoformat()
+
+            # Обновляем story_total (B) и updated_at (I)
+            self.service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f'Users!B{row_index}',
+                valueInputOption='RAW',
+                body={'values': [[str(new_value)]]}
+            ).execute()
+
+            self.service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f'Users!I{row_index}',
+                valueInputOption='RAW',
+                body={'values': [[now]]}
+            ).execute()
+
+            logger.info(f"story_total={new_value} для user_id={user_id}")
+            return new_value
+
+        except Exception as e:
+            logger.error(f"Ошибка increment_story_total для {user_id}: {e}")
+            return 0
+    def increment_story_total(self, user_id: int) -> int:
+        """
+        Увеличивает Users.story_total (колонка K) на 1 для пользователя user_id.
+        Возвращает новое значение.
+        """
+        try:
+            # Ищем строку пользователя
+            range_name = 'Users!A2:K'
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=range_name
+            ).execute()
+
+            rows = result.get('values', [])
+            row_index = None
+            current_val = 0
+
+            for idx, row in enumerate(rows):
+                if len(row) > 0 and str(row[0]) == str(user_id):
+                    row_index = idx + 2  # строка в Sheets (1-based, с учетом заголовка)
+                    if len(row) > 10 and str(row[10]).strip() != "":
+                        try:
+                            current_val = int(float(str(row[10]).strip()))
+                        except Exception:
+                            current_val = 0
+                    break
+
+            if row_index is None:
+                logger.warning(f"Пользователь {user_id} не найден для increment_story_total")
+                return 0
+
+            new_val = current_val + 1
+            now = datetime.now().isoformat()
+
+            # K = story_total, G = updated_at
+            self.service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f'Users!K{row_index}',
+                valueInputOption='RAW',
+                body={'values': [[str(new_val)]]}
+            ).execute()
+
+            self.service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f'Users!G{row_index}',
+                valueInputOption='RAW',
+                body={'values': [[now]]}
+            ).execute()
+
+            logger.info(f"story_total incremented user_id={user_id} new_val={new_val}")
+            return new_val
+
+        except Exception as e:
+            logger.error(f"Ошибка increment_story_total для {user_id}: {e}")
+            return 0
+
     def save_story(
         self,
         user_id: int,
@@ -310,11 +424,16 @@ class GoogleSheetsClient:
             ).execute()
             
             logger.info(f"Басня сохранена для пользователя {user_id}")
-            
+            self.increment_story_total(user_id)
+
+            # Увеличиваем счетчик всех сказок
+            self.increment_story_total(user_id)
+
             # Выполняем trim до последних 5 записей
             self._trim_stories(user_id)
-            
+
             return True
+
         except Exception as e:
             logger.error(f"Ошибка сохранения басни для пользователя {user_id}: {e}")
             return False
