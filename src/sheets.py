@@ -426,7 +426,7 @@ class GoogleSheetsClient:
             logger.info(f"Басня сохранена для пользователя {user_id}")
             self.increment_story_total(user_id)
 
-            # Увеличиваем счетчик всех сказок
+            # Увеличиваем счетчик всех басен
             self.increment_story_total(user_id)
 
             # Выполняем trim до последних 5 записей

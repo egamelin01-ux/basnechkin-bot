@@ -16,6 +16,7 @@ class User(Base):
     age = Column(String(50), nullable=True)
     traits = Column(Text, nullable=True)
     context_active = Column(Text, nullable=True)
+    wishes = Column(Text, nullable=True)
     story_total = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -38,6 +39,7 @@ class User(Base):
             'age': self.age or '',
             'traits': self.traits or '',
             'context_active': self.context_active or '',
+            'wishes': self.wishes or '',
             'story_total': self.story_total,
             'created_at': self.created_at.isoformat() if self.created_at else '',
             'updated_at': self.updated_at.isoformat() if self.updated_at else '',

@@ -81,7 +81,11 @@ def upsert_user_profile(
         return True
     except Exception as e:
         db.rollback()
-        logger.error(f"Ошибка сохранения профиля пользователя {telegram_id}: {e}")
+        error_msg = str(e)
+        logger.error(f"Ошибка сохранения профиля пользователя {telegram_id}: {e}", exc_info=True)
+        # Проверяем, не связана ли ошибка с отсутствующей колонкой wishes
+        if "wishes" in error_msg.lower() or "column" in error_msg.lower():
+            logger.error(f"ВНИМАНИЕ: Возможно, колонка 'wishes' отсутствует в БД. Примените миграцию: python apply_wishes_migration.py")
         return False
     finally:
         db.close()

@@ -1,11 +1,14 @@
 services:
   basnechkin-bot:
-    image: amelin001/basnechkin-bot:latest
+    build: .
     container_name: basnechkin-bot
     restart: unless-stopped
     env_file:
       - .env
     volumes:
+      # Монтируем код для разработки - изменения применяются без пересборки
+      - ./src:/app/src
+      - ./main.py:/app/main.py
       # Монтируем .env для удобства (но он в .dockerignore, так что нужно передать через env_file)
       - ./logs:/app/logs
     # База данных остается на AlwaysData, поэтому не добавляем service для БД

@@ -220,6 +220,30 @@ INFO - Бот запущен и готов к работе
 - Убедитесь, что на счетах есть достаточный баланс
 - Проверьте логи в консоли для детальной информации об ошибке
 
+## Docker Hub
+
+Проект готов для публикации в Docker Hub. Подробные инструкции см. в [DOCKERHUB_SETUP.md](DOCKERHUB_SETUP.md).
+
+### Быстрый старт
+
+1. Авторизуйтесь в Docker Hub:
+   ```bash
+   docker login
+   ```
+
+2. Соберите и запушьте образ:
+   ```bash
+   push_to_dockerhub.bat ваш_username
+   ```
+
+3. Используйте образ в docker-compose.yml:
+   ```yaml
+   services:
+     basnechkin-bot:
+       image: ваш_username/basnechkin-bot:latest
+       # ... остальные настройки
+   ```
+
 ## Лицензия
 
 Проект создан для личного использования.

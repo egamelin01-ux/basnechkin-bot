@@ -44,6 +44,7 @@ if DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
 # Настройки
 ANTIFLOOD_SECONDS = int(os.getenv("ANTIFLOOD_SECONDS", "15"))
 PROFILE_CACHE_TTL_MINUTES = int(os.getenv("PROFILE_CACHE_TTL_MINUTES", "5"))
+DAILY_STORY_LIMIT = int(os.getenv("DAILY_STORY_LIMIT", "15"))
 
 # Пути
 BASE_DIR = Path(__file__).parent.parent
