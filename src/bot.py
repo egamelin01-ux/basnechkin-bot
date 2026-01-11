@@ -277,7 +277,7 @@ def markdown_to_html(text: str) -> str:
     Преобразует markdown разметку в HTML для Telegram.
     
     Преобразует:
-    - **текст** → <b>текст</b> (жирный)
+    - **текст** → <b>текст</b> (жирный) - только первое вхождение (название)
     - *текст* → <i>текст</i> (курсив)
     - __текст__ → <u>текст</u> (подчеркнутый)
     
@@ -289,8 +289,21 @@ def markdown_to_html(text: str) -> str:
     """
     import re
     
-    # Преобразуем **текст** в <b>текст</b> (жирный)
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # Находим первое вхождение **текст** (название басни)
+    # Преобразуем только его в <b>текст</b>
+    # Все остальные **текст** удаляем (убираем звездочки, оставляем текст)
+    first_bold_match = re.search(r'\*\*(.+?)\*\*', text)
+    if first_bold_match:
+        # Заменяем первое вхождение на HTML
+        title_text = first_bold_match.group(1)
+        title_html = f'<b>{title_text}</b>'
+        text = text[:first_bold_match.start()] + title_html + text[first_bold_match.end():]
+        
+        # Удаляем все остальные **текст** (убираем звездочки)
+        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    else:
+        # Если нет жирного текста, просто продолжаем
+        pass
     
     # Преобразуем __текст__ в <u>текст</u> (подчеркнутый)
     text = re.sub(r'__(.+?)__', r'<u>\1</u>', text)
@@ -481,27 +494,68 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
     
     elif callback_data == "story_add_traits":
-        # Изменить характер - просим описать изменения
+        # Обработка характера
         logger.info(f"Пользователь {user_id} выбрал 'Дополнить характер'")
         
-        # Показываем текущий характер для справки
+        current_traits = profile.get('traits', '').strip() if profile.get('traits') else ''
+        
+        if current_traits:
+            # Есть существующий характер - предлагаем дополнить или удалить
+            keyboard = [
+                [InlineKeyboardButton("Дополнить характер", callback_data="traits_add")],
+                [InlineKeyboardButton("Удалить характер", callback_data="traits_delete")],
+                [InlineKeyboardButton("Отмена", callback_data="traits_cancel")]
+            ]
+            await query.message.reply_text(
+                f"Текущий характер:\n{current_traits}\n\n"
+                "Что вы хотите сделать?",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            # Нет характера - запрашиваем новый
+            await query.message.reply_text(
+                "Опишите, пожалуйста, какими основными чертами характера отличается ваш ребенок?\n\n"
+                "Например: спокойный, любознательный, стеснительный, упрямый, добрый и т.д."
+            )
+            context.user_data['waiting_for'] = 'add_traits'
+            context.user_data['traits_action'] = 'add'  # Флаг для дополнения
+            return ASKING_TRAITS_ADDITION
+        
+        return ConversationHandler.END
+    
+    elif callback_data == "traits_add":
+        # Дополнить характер
         current_traits = profile.get('traits', '').strip() if profile.get('traits') else ''
         if current_traits:
             await query.message.reply_text(
                 f"Текущий характер:\n{current_traits}\n\n"
-                "Опишите, что вы хотите добавить или изменить в характере.\n\n"
-                "Например:\n"
-                "- 'Добавь вежливый' - дополнит текущий характер\n"
-                "- 'Убери упрямый' - удалит черту из текущего характера"
+                "Напишите, что вы хотите добавить к характеру:"
             )
         else:
             await query.message.reply_text(
-                "Опишите черты характера вашего ребенка(детей).\n\n"
-                "Например: 'Платон Лидер — умеет вести за собой, вовлекать, договариваться. Демид Создатель миров — способность строить сложные игровые и смысловые конструкции.'"
+                "Опишите, пожалуйста, какими основными чертами характера отличается ваш ребенок?\n\n"
+                "Например: спокойный, любознательный, стеснительный, упрямый, добрый и т.д."
             )
         context.user_data['waiting_for'] = 'add_traits'
-        logger.info(f"Переход в состояние ASKING_TRAITS_ADDITION для пользователя {user_id}")
+        context.user_data['traits_action'] = 'add'  # Флаг для дополнения
         return ASKING_TRAITS_ADDITION
+    
+    elif callback_data == "traits_delete":
+        # Удалить характер
+        success = update_user_fields(user_id, traits='')
+        if success:
+            profile_cache.invalidate(user_id)
+            await query.message.reply_text("✅ Характер удален.")
+            # Показываем первое меню
+            await show_story_options(update, context)
+        else:
+            await query.message.reply_text("❌ Произошла ошибка при удалении характера.")
+        return ConversationHandler.END
+    
+    elif callback_data == "traits_cancel":
+        # Отмена - показываем второе меню
+        await query.message.reply_text("•", reply_markup=create_menu_keyboard())
+        return ConversationHandler.END
     
     elif callback_data == "story_wishes":
         # Обработка пожеланий
@@ -552,13 +606,15 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if success:
             profile_cache.invalidate(user_id)
             await query.message.reply_text("✅ Пожелания удалены.")
+            # Показываем первое меню
+            await show_story_options(update, context)
         else:
             await query.message.reply_text("❌ Произошла ошибка при удалении пожеланий.")
         return ConversationHandler.END
     
     elif callback_data == "wishes_cancel":
-        # Отмена
-        await query.message.reply_text("Отменено.")
+        # Отмена - показываем второе меню
+        await query.message.reply_text("•", reply_markup=create_menu_keyboard())
         return ConversationHandler.END
     
     elif callback_data == "feedback":
@@ -699,25 +755,11 @@ async def handle_wishes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if updated_profile:
         profile_cache.set(user_id, updated_profile)
     
-    # Проверяем антифлуд перед генерацией
-    can_gen, message = antiflood.can_generate(user_id)
-    if not can_gen:
-        await update.message.reply_text(
-            f"✅ Пожелания сохранены! {message}"
-        )
-        return ConversationHandler.END
+    # Сообщаем об успешном сохранении
+    await update.message.reply_text("✅ Пожелания сохранены!")
     
-    # Начинаем генерацию
-    antiflood.start_generation(user_id)
-    
-    try:
-        await update.message.reply_text(
-            "✅ Пожелания сохранены! ✒️ Пишу басню с учетом ваших пожеланий..."
-        )
-        # Генерируем басню с учетом пожеланий
-        await generate_story_with_wishes(update, context, user_id, updated_profile, wishes)
-    finally:
-        antiflood.finish_generation(user_id)
+    # Показываем первое меню (НЕ генерируем басню)
+    await show_story_options(update, context)
     
     return ConversationHandler.END
 
@@ -756,25 +798,11 @@ async def handle_wishes_edit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if updated_profile:
         profile_cache.set(user_id, updated_profile)
     
-    # Проверяем антифлуд перед генерацией
-    can_gen, message = antiflood.can_generate(user_id)
-    if not can_gen:
-        await update.message.reply_text(
-            f"✅ Пожелания дополнены! {message}"
-        )
-        return ConversationHandler.END
+    # Сообщаем об успешном сохранении
+    await update.message.reply_text("✅ Пожелания дополнены!")
     
-    # Начинаем генерацию
-    antiflood.start_generation(user_id)
-    
-    try:
-        await update.message.reply_text(
-            "✅ Пожелания дополнены! ✒️ Пишу басню с учетом ваших пожеланий..."
-        )
-        # Генерируем басню с учетом обновленных пожеланий
-        await generate_story_with_wishes(update, context, user_id, updated_profile, updated_wishes)
-    finally:
-        antiflood.finish_generation(user_id)
+    # Показываем первое меню (НЕ генерируем басню)
+    await show_story_options(update, context)
     
     return ConversationHandler.END
 
@@ -828,13 +856,10 @@ async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_traits_addition(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ответа на вопрос о дополнении/изменении характера."""
+    """Обработчик ответа на вопрос о дополнении характера."""
     user_id = update.effective_user.id
-    logger.info(f"Получен ответ на изменение характера от пользователя {user_id}")
+    logger.info(f"Получен ответ на дополнение характера от пользователя {user_id}")
     user_message = update.message.text.strip()
-    
-    # Отправляем статусное сообщение сразу же
-    status_msg = await update.message.reply_text("✒️ Пишу басню с учетом изменений в характере...")
     
     # Получаем текущий профиль
     profile = profile_cache.get(user_id)
@@ -844,49 +869,87 @@ async def handle_traits_addition(update: Update, context: ContextTypes.DEFAULT_T
             profile_cache.set(user_id, profile)
     
     if not profile:
-        await status_msg.edit_text(
+        await update.message.reply_text(
             "Произошла ошибка при загрузке профиля. Попробуйте позже."
         )
         return ConversationHandler.END
     
-    # Используем агента для анализа намерения пользователя
-    # Агент определит: удалить, заменить, дополнить или удалить частично
-    # Передаем флаг is_add_traits_request=True, так как пользователь нажал кнопку "Дополнить характер"
-    try:
-        agent_response = agent_router.process_message(user_message, profile, is_add_traits_request=True)
-        logger.info(f"Agent 1 обработал запрос на изменение характера для пользователя {user_id}")
-    except Exception as e:
-        logger.error(f"Ошибка при вызове Agent 1 для изменения характера: {e}", exc_info=True)
-        await status_msg.edit_text(
-            "❌ Ошибка при обработке запроса. Попробуйте позже."
-        )
-        return ConversationHandler.END
+    # Определяем действие из context (добавлено или дополнение)
+    traits_action = context.user_data.get('traits_action', 'add')
+    current_traits = profile.get('traits', '').strip() if profile.get('traits') else ''
     
-    # Обновляем профиль, если агент определил, что нужно обновить
-    if agent_response.get("should_update_profile", False):
-        profile_patch = agent_response.get("profile_patch", {})
-        if profile_patch and "traits" in profile_patch:
-            # Обновляем traits в БД (может быть пустой строкой для удаления)
-            success = update_user_fields(user_id, traits=profile_patch["traits"])
+    if traits_action == 'add':
+        # Дополняем характер - используем agent_router для правильного объединения
+        # с учетом структуры имен, но явно указываем, что это дополнение
+        try:
+            # Формируем сообщение с явным указанием на дополнение
+            addition_message = f"Добавь к текущему характеру: {user_message}"
+            agent_response = agent_router.process_profile_update(addition_message, profile)
+            logger.info(f"Agent 1 обработал запрос на дополнение характера для пользователя {user_id}")
+        except Exception as e:
+            logger.error(f"Ошибка при вызове Agent 1 для дополнения характера: {e}", exc_info=True)
+            # Fallback: просто объединяем тексты
+            if current_traits:
+                updated_traits = f"{current_traits}\n{user_message}"
+            else:
+                updated_traits = user_message
+            
+            success = update_user_fields(user_id, traits=updated_traits)
             if not success:
-                await status_msg.edit_text(
+                await update.message.reply_text(
                     "Произошла ошибка при сохранении. Попробуйте позже."
                 )
                 return ConversationHandler.END
             
-            # Инвалидируем кэш и обновляем
             profile_cache.invalidate(user_id)
-            updated_profile = get_user(user_id)
-            if updated_profile:
-                profile_cache.set(user_id, updated_profile)
-                profile = updated_profile
+            await update.message.reply_text("✅ Характер успешно дополнен!")
+            await show_story_options(update, context)
+            return ConversationHandler.END
+        
+        # Обновляем профиль, если агент определил, что нужно обновить
+        if agent_response.get("should_update_profile", False):
+            profile_patch = agent_response.get("profile_patch", {})
+            if profile_patch and "traits" in profile_patch:
+                # Обновляем traits в БД
+                success = update_user_fields(user_id, traits=profile_patch["traits"])
+                if not success:
+                    await update.message.reply_text(
+                        "Произошла ошибка при сохранении. Попробуйте позже."
+                    )
+                    return ConversationHandler.END
+                
+                # Инвалидируем кэш и обновляем
+                profile_cache.invalidate(user_id)
+                updated_profile = get_user(user_id)
+                if updated_profile:
+                    profile_cache.set(user_id, updated_profile)
+                
+                # Сообщаем об успешном сохранении
+                await update.message.reply_text("✅ Характер успешно дополнен!")
+            else:
+                logger.warning(f"Agent вернул should_update_profile=True, но traits отсутствует в profile_patch для пользователя {user_id}")
+                await update.message.reply_text("✅ Запрос обработан.")
         else:
-            logger.warning(f"Agent вернул should_update_profile=True, но traits отсутствует в profile_patch для пользователя {user_id}")
+            logger.info(f"Agent определил, что обновление профиля не требуется для пользователя {user_id}")
+            await update.message.reply_text("✅ Запрос обработан.")
     else:
-        logger.info(f"Agent определил, что обновление профиля не требуется для пользователя {user_id}")
+        # Если по какой-то причине action не 'add', просто сохраняем как новый
+        success = update_user_fields(user_id, traits=user_message)
+        if not success:
+            await update.message.reply_text(
+                "Произошла ошибка при сохранении. Попробуйте позже."
+            )
+            return ConversationHandler.END
+        
+        profile_cache.invalidate(user_id)
+        await update.message.reply_text("✅ Характер успешно сохранен!")
     
-    # Генерируем басню с обновленным характером
-    await generate_story_with_updated_traits(update, context, user_id, profile, user_message, status_msg)
+    # Очищаем временные данные
+    context.user_data.pop('traits_action', None)
+    context.user_data.pop('waiting_for', None)
+    
+    # Показываем первое меню вместо генерации басни
+    await show_story_options(update, context)
     
     return ConversationHandler.END
 
@@ -1368,11 +1431,11 @@ def main():
     # Создаем CallbackQueryHandler для fallbacks, который может прервать ожидание
     callback_interrupt_handler = CallbackQueryHandler(
         handle_story_callback, 
-        pattern="^(story_|wishes_|menu|feedback|feedback_star_|about_|menu_back)"
+        pattern="^(story_|wishes_|traits_|menu|feedback|feedback_star_|about_|menu_back)"
     )
     
     story_modify_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_story_callback, pattern="^(story_|wishes_|menu|feedback|feedback_star_|about_)")],
+        entry_points=[CallbackQueryHandler(handle_story_callback, pattern="^(story_|wishes_|traits_|menu|feedback|feedback_star_|about_)")],
         states={
             ASKING_NEW_DILEMMA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_dilemma),
