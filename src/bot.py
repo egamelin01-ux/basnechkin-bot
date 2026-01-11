@@ -4,6 +4,7 @@ import random
 from typing import Dict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -21,6 +22,7 @@ from db.repository import (
     update_user_fields,
     save_story,
     delete_user_profile,
+    get_last_stories,
 )
 from agent_router import AgentRouter
 from deepseek_client import DeepSeekClient
@@ -42,6 +44,9 @@ ASKING_NEW_DILEMMA, ASKING_TRAITS_ADDITION = range(4, 6)
 # Состояния FSM для пожеланий
 ASKING_WISHES, ASKING_WISHES_EDIT = range(6, 8)
 
+# Состояния FSM для отзывов
+ASKING_FEEDBACK = range(8, 9)[0]
+
 # Инициализация компонентов
 agent_router = AgentRouter()
 deepseek_client = DeepSeekClient()
@@ -56,6 +61,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Пользователь {user_id} ({username}) запустил бота")
     
+    # Очищаем любые предыдущие состояния
+    context.user_data.clear()
+    
     # Проверяем, есть ли уже профиль
     profile = get_user(user_id)
     if profile:
@@ -68,7 +76,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Отправляем приветственные сообщения
     await update.message.reply_text(
-        "👋 Здравствуйте! Я Баснечкин.\n\n"
+        "👋 Здравствуйте! Я Басенник.\n\n"
         "Моя задача — помогать родителям наставлять ребёнка через художественные басни "
         ", в которых ребёнок становится персонажем истории."
     )
@@ -200,7 +208,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "У вас нет сохраненного профиля. Используйте /start для регистрации."
         )
-        return
+        return ConversationHandler.END
     
     # Удаляем профиль и все басни
     success = delete_user_profile(user_id)
@@ -221,6 +229,8 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ Произошла ошибка при удалении профиля. Попробуйте позже."
         )
+    
+    return ConversationHandler.END
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -262,14 +272,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         antiflood.finish_generation(user_id)
 
 
+def markdown_to_html(text: str) -> str:
+    """
+    Преобразует markdown разметку в HTML для Telegram.
+    
+    Преобразует:
+    - **текст** → <b>текст</b> (жирный)
+    - *текст* → <i>текст</i> (курсив)
+    - __текст__ → <u>текст</u> (подчеркнутый)
+    
+    Args:
+        text: Текст с markdown разметкой
+        
+    Returns:
+        Текст с HTML разметкой
+    """
+    import re
+    
+    # Преобразуем **текст** в <b>текст</b> (жирный)
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    
+    # Преобразуем __текст__ в <u>текст</u> (подчеркнутый)
+    text = re.sub(r'__(.+?)__', r'<u>\1</u>', text)
+    
+    # Преобразуем *текст* в <i>текст</i> (курсив), но только если это не часть **
+    # Используем негативный просмотр, чтобы не конфликтовать с **
+    text = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<i>\1</i>', text)
+    
+    return text
+
+
 def create_story_options_keyboard() -> InlineKeyboardMarkup:
     """Создает клавиатуру с кнопками выбора для следующей басни."""
     keyboard = [
         [InlineKeyboardButton("1️⃣ Новая дилемма", callback_data="story_new_dilemma")],
         [InlineKeyboardButton("2️⃣ Со случайной моралью", callback_data="story_random_moral")],
         [InlineKeyboardButton("3️⃣ Прошлая мораль", callback_data="story_previous_moral")],
-        [InlineKeyboardButton("4️⃣ Дополнить характер", callback_data="story_add_traits")],
-        [InlineKeyboardButton("5️⃣ Пожелания", callback_data="story_wishes")]
+        [InlineKeyboardButton("4️⃣ Вопросы для размышлений", callback_data="story_reflection_questions")],
+        [InlineKeyboardButton("5️⃣ Меню", callback_data="menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def create_menu_keyboard() -> InlineKeyboardMarkup:
+    """Создает клавиатуру меню с дополнительными опциями."""
+    # Используем неразрывный пробел (NBSP) после стрелки для выравнивания текста по левому краю
+    nbsp = "\u00A0"
+    keyboard = [
+        [InlineKeyboardButton(f"➡️{nbsp}Дополнить характер", callback_data="story_add_traits")],
+        [InlineKeyboardButton(f"➡️{nbsp}Пожелания к басне", callback_data="story_wishes")],
+        [InlineKeyboardButton(f"➡️{nbsp}Отзывы", callback_data="feedback")],
+        [InlineKeyboardButton(f"➡️{nbsp}Польза Басенника", callback_data="about_benefits")],
+        [InlineKeyboardButton(f"⬅️{nbsp}Назад", callback_data="menu_back")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def create_feedback_stars_keyboard() -> InlineKeyboardMarkup:
+    """Создает клавиатуру с кнопками звездочек для отзыва."""
+    keyboard = [
+        [
+            InlineKeyboardButton("⭐", callback_data="feedback_star_1"),
+            InlineKeyboardButton("⭐⭐", callback_data="feedback_star_2"),
+            InlineKeyboardButton("⭐⭐⭐", callback_data="feedback_star_3")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -298,6 +364,14 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
     callback_data = query.data
     logger.info(f"Обработка callback {callback_data} для пользователя {user_id}")
     
+    # Если пользователь был в состоянии ожидания, отменяем предыдущий запрос
+    if context.user_data.get('waiting_for'):
+        waiting_for = context.user_data.get('waiting_for')
+        logger.info(f"Пользователь {user_id} отменяет предыдущий запрос '{waiting_for}' и обрабатывает новую кнопку '{callback_data}'")
+        context.user_data.pop('waiting_for', None)
+        # Очищаем waiting_for, чтобы выйти из состояния ожидания
+        # ConversationHandler.END будет возвращен в конце обработки callback
+    
     # Проверяем наличие профиля
     profile = profile_cache.get(user_id)
     if not profile:
@@ -319,7 +393,45 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     # Обрабатываем разные типы callback
-    if callback_data == "story_new_dilemma":
+    if callback_data == "story_reflection_questions":
+        # Вопросы для размышлений - получаем последнюю сказку и генерируем вопросы
+        try:
+            # Получаем последнюю сказку
+            last_stories = get_last_stories(user_id, limit=1)
+            if not last_stories:
+                await query.message.reply_text(
+                    "У вас пока нет сохраненных басен. Сначала сгенерируйте басню."
+                )
+                return ConversationHandler.END
+            
+            last_story_text = last_stories[0]['text']
+            
+            # Генерируем вопросы через роутер
+            await query.message.reply_text("💭 Формирую вопросы для размышлений...")
+            questions = agent_router.generate_reflection_questions(last_story_text, profile)
+            
+            # Формируем сообщение с вопросами
+            message_text = "<b>Для развития у ребенка рефлексии и закрепления морали из предыдущей сказки рекомендуется задать чаду вопросы:</b>\n\n"
+            for i, question in enumerate(questions, 1):
+                # Экранируем HTML-символы в вопросах
+                question_escaped = question.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                message_text += f"{i}. {question_escaped}\n"
+            
+            await query.message.reply_text(message_text, parse_mode=ParseMode.HTML)
+            
+            # Показываем меню с кнопками выбора
+            await show_story_options(update, context)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при генерации вопросов для размышлений: {e}", exc_info=True)
+            await query.message.reply_text(
+                "❌ Произошла ошибка при генерации вопросов. Попробуйте позже."
+            )
+            # Показываем меню даже при ошибке
+            await show_story_options(update, context)
+        return ConversationHandler.END
+    
+    elif callback_data == "story_new_dilemma":
         # Новая дилемма - просим описать ситуацию
         await query.message.reply_text(
             "Опишите новую ситуацию или дилемму, которую хотите разобрать в следующей басне:\n\n"
@@ -352,6 +464,20 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
         
         await query.message.reply_text("✒️ Пишу басню с прошлой моралью...")
         await generate_story_with_previous_moral(update, context, user_id, profile, context_active)
+        return ConversationHandler.END
+    
+    elif callback_data == "menu":
+        # Показываем меню с дополнительными опциями
+        await query.message.reply_text("•", reply_markup=create_menu_keyboard())
+        return ConversationHandler.END
+    
+    elif callback_data == "menu_back":
+        # Возврат из меню к основным кнопкам
+        text = (
+            "📖 Будем ли что-то менять в следующей басне?\n\n"
+            "Выберите один из вариантов:"
+        )
+        await query.message.reply_text(text, reply_markup=create_story_options_keyboard())
         return ConversationHandler.END
     
     elif callback_data == "story_add_traits":
@@ -398,7 +524,7 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             # Нет пожеланий - запрашиваем новые
             await query.message.reply_text(
-                "Какие у вас есть дополнительные пожелания? Мы учтем их при написании следующей басни."
+                "Какие у вас есть дополнительные пожелания? Мы учтем их при написании следующих басен."
             )
             context.user_data['waiting_for'] = 'wishes'
             return ASKING_WISHES
@@ -415,7 +541,7 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
         else:
             await query.message.reply_text(
-                "Какие у вас есть дополнительные пожелания? Мы учтем их при написании следующей басни."
+                "Какие у вас есть дополнительные пожелания? Мы учтем их при написании следующих басен."
             )
         context.user_data['waiting_for'] = 'wishes_edit'
         return ASKING_WISHES_EDIT
@@ -433,6 +559,93 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "wishes_cancel":
         # Отмена
         await query.message.reply_text("Отменено.")
+        return ConversationHandler.END
+    
+    elif callback_data == "feedback":
+        # Показываем интерфейс отзыва
+        text = "Оставьте отзыв, чтобы мы могли стать лучше"
+        await query.message.reply_text(text, reply_markup=create_feedback_stars_keyboard())
+        return ConversationHandler.END
+    
+    elif callback_data.startswith("feedback_star_"):
+        # Пользователь выбрал количество звезд
+        try:
+            stars = int(callback_data.split("_")[-1])
+            context.user_data['feedback_stars'] = stars
+            await query.message.reply_text(
+                f"Вы выбрали {stars} {'звезду' if stars == 1 else 'звезды' if stars == 2 else 'звезд'}.\n\n"
+                "Напишите ваш отзыв :"
+            )
+            context.user_data['waiting_for'] = 'feedback'
+            return ASKING_FEEDBACK
+        except (ValueError, IndexError):
+            logger.error(f"Ошибка парсинга количества звезд из callback_data: {callback_data}")
+            await query.message.reply_text("Произошла ошибка. Попробуйте еще раз.")
+            return ConversationHandler.END
+    
+    elif callback_data == "about_benefits":
+        # Показываем информацию о пользе Басенника
+        benefits_text = (
+            "<b>Польза Басенника</b>\n\n"
+
+            "<b>1. Воспитание без давления и нотаций</b>\n\n"
+            "Басенник помогает объяснять детям сложные вещи простыми словами. Родитель говорит с ребёнком через историю, а не через запреты — это снижает сопротивление и усиливает доверие.\n\n"
+
+            "<b>2. Формирование характера и внутренних ориентиров</b>\n\n"
+            "Регулярные басни закладывают внутренний моральный компас ребёнка:\n\n"
+            "Понимание что хорошо, а что плохо («честно — выгодно», «Зависть разрушает, труд развивает»)\n\n"
+            "Это развивает умение делать выбор опираясь на внутренние критерии, а не из страха наказания.\n\n"
+
+            "<b>3. Авторитет родителя, который сохраняется с возрастом</b>\n\n"
+            "Когда родитель выступает как проводник смысла - формируется уважение.\n"
+            "Такой авторитет сохраняется и в подростковом, и даже во взрослом возрасте.\n\n"
+
+            "<b>4. Голос родителя = спокойствие и безопасность</b>\n\n"
+            "Чтение басен перед сном формирует устойчивую связку:\n"
+            "голос родителя — это покой, принятие и поддержка.\n\n"
+            "Со временем это приводит к тому, что ребёнок легче слышит и принимает мнение родителя, без внутреннего сопротивления.\n\n"
+
+            "<b>5. Персонализация под возраст и ситуацию ребёнка</b>\n\n"
+            "Наш Басенник автоматически адаптирует басни под возраст:\n\n"
+            "простые слова и образы для малышей, более сложные смыслы и дилеммы для старших детей.\n\n"
+            "Истории затрагивают именно те проблемы, которые актуальны ребёнку здесь и сейчас.\n\n"
+
+            "<b>6. Развитие мышления и ответственности</b>\n\n"
+            "Каждая басня показывает связь:\n"
+            "поступок → последствия.\n"
+            "Это развивает причинно-следственное мышление и умение прогнозировать свои действия.\n\n"
+
+            "<b>7. Вам не нужно ничего придумывать</b>\n\n"
+            "Достаточно нажать кнопку «Случайная мораль» — Басенник сам подберёт подходящую тему под возраст и напишет готовую басню. Это удобно, быстро и не требует подготовки.\n\n"
+
+            "<b>8. Вы можете прописать свою диллему</b>\n\n"
+            "Пропишите свою проблему, с которой столкнулся ребенок и Басенник напишет поучительную басню именно под ваш запрос. Там будет решение для ребенка в вашей ситуации, написанное словами, под возраст вашего чада.\n\n"
+
+            "<b>9. Ребёнку действительно интересно</b>\n\n"
+            "Ребёнок — главный герой истории.\n"
+            "Это повышает внимание, вовлечённость и желание слушать, даже у тех детей, кто обычно «не слышит» взрослых.\n\n"
+
+            "<b>10. Развитие речи и словарного запаса</b>\n\n"
+            "Регулярное чтение басен:\n"
+            "- обогащает язык,\n"
+            "- развивает образное мышление,\n"
+            "- улучшает способность выражать мысли и чувства.\n\n"
+            
+            "<b>11. Вечерний ритуал и лучшая регуляция сна</b>\n\n"
+            "Один и тот же вечерний сценарий:\n"
+            "- снижает тревожность,\n"
+            "- помогает быстрее засыпать,\n"
+            "- даёт ребёнку ощущение стабильности и опоры"
+        )
+        await query.message.reply_text(benefits_text, parse_mode=ParseMode.HTML)
+        
+        # Показываем кнопки выбора для следующей басни
+        text = (
+            "📖 Будем ли что-то менять в следующей басне?\n\n"
+            "Выберите один из вариантов:"
+        )
+        await query.message.reply_text(text, reply_markup=create_story_options_keyboard())
+        
         return ConversationHandler.END
     
     logger.warning(f"Неизвестный callback_data: {callback_data} для пользователя {user_id}")
@@ -562,6 +775,54 @@ async def handle_wishes_edit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await generate_story_with_wishes(update, context, user_id, updated_profile, updated_wishes)
     finally:
         antiflood.finish_generation(user_id)
+    
+    return ConversationHandler.END
+
+
+async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текста отзыва."""
+    user_id = update.effective_user.id
+    feedback_text = update.message.text.strip()
+    
+    # Получаем количество звезд из context
+    stars = context.user_data.get('feedback_stars')
+    
+    if not stars:
+        # Если по какой-то причине нет звезд, просим выбрать заново
+        await update.message.reply_text(
+            "Пожалуйста, сначала выберите количество звезд."
+        )
+        return ConversationHandler.END
+    
+    # Проверяем, если пользователь отправил /skip
+    if feedback_text.lower() in ['/skip', 'skip', 'пропустить']:
+        feedback_text = ''
+    
+    # Формируем финальный текст отзыва
+    if feedback_text:
+        feedback_value = f"{stars} + {feedback_text}"
+    else:
+        feedback_value = str(stars)
+    
+    # Сохраняем отзыв в БД
+    success = update_user_fields(user_id, feedback=feedback_value)
+    if not success:
+        await update.message.reply_text(
+            "Произошла ошибка при сохранении отзыва. Попробуйте позже."
+        )
+        return ConversationHandler.END
+    
+    # Инвалидируем кэш
+    profile_cache.invalidate(user_id)
+    
+    # Очищаем временные данные
+    context.user_data.pop('feedback_stars', None)
+    context.user_data.pop('waiting_for', None)
+    
+    await update.message.reply_text("✅ Спасибо за ваш отзыв!")
+    
+    # Показываем меню
+    await update.message.reply_text("•", reply_markup=create_menu_keyboard())
     
     return ConversationHandler.END
 
@@ -943,13 +1204,16 @@ async def generate_and_send_story_internal(
             except Exception as e:
                 logger.warning(f"Не удалось удалить статус-сообщение: {e}")
         
+        # Преобразуем markdown разметку в HTML
+        story_text_html = markdown_to_html(story_text)
+        
         # Отправляем басню частями, если она длинная
-        chunks = split_message(story_text)
+        chunks = split_message(story_text_html)
         for i, chunk in enumerate(chunks):
             if i == 0:
-                await message_target.reply_text(chunk)
+                await message_target.reply_text(chunk, parse_mode=ParseMode.HTML)
             else:
-                await message_target.reply_text(chunk)
+                await message_target.reply_text(chunk, parse_mode=ParseMode.HTML)
         
         # Показываем кнопки выбора для следующей басни
         await show_story_options(update, context)
@@ -1093,19 +1357,49 @@ def main():
             ASKING_TRAITS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_traits)],
             ASKING_SITUATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_situation)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start_command),
+            CommandHandler("reset", reset_command),
+        ],
     )
     
     # ConversationHandler для изменения басни
+    # Создаем CallbackQueryHandler для fallbacks, который может прервать ожидание
+    callback_interrupt_handler = CallbackQueryHandler(
+        handle_story_callback, 
+        pattern="^(story_|wishes_|menu|feedback|feedback_star_|about_|menu_back)"
+    )
+    
     story_modify_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_story_callback, pattern="^(story_|wishes_)")],
+        entry_points=[CallbackQueryHandler(handle_story_callback, pattern="^(story_|wishes_|menu|feedback|feedback_star_|about_)")],
         states={
-            ASKING_NEW_DILEMMA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_dilemma)],
-            ASKING_TRAITS_ADDITION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_traits_addition)],
-            ASKING_WISHES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wishes)],
-            ASKING_WISHES_EDIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wishes_edit)],
+            ASKING_NEW_DILEMMA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_dilemma),
+                callback_interrupt_handler
+            ],
+            ASKING_TRAITS_ADDITION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_traits_addition),
+                callback_interrupt_handler
+            ],
+            ASKING_WISHES: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wishes),
+                callback_interrupt_handler
+            ],
+            ASKING_WISHES_EDIT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wishes_edit),
+                callback_interrupt_handler
+            ],
+            ASKING_FEEDBACK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_feedback),
+                callback_interrupt_handler
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start_command),
+            CommandHandler("reset", reset_command),
+        ],
     )
     
     # Регистрируем обработчики
