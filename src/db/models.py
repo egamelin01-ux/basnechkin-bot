@@ -1,5 +1,5 @@
 """SQLAlchemy ORM models."""
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index, BigInteger
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index, BigInteger, Date
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -82,4 +82,29 @@ class Context(Base):
     __table_args__ = (
         Index('ix_contexts_user_kind_created', 'user_id', 'kind', 'created_at'),
     )
+
+
+class DailyStats(Base):
+    """Daily statistics model."""
+    __tablename__ = "daily_stats"
+
+    date = Column(Date, primary_key=True, index=True)
+    stories_count = Column(Integer, default=0, nullable=False)
+    new_users_count = Column(Integer, default=0, nullable=False)
+    start_command_count = Column(Integer, default=0, nullable=False)
+    profile_completed_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        """Convert daily stats to dictionary."""
+        return {
+            'date': self.date.isoformat() if self.date else '',
+            'stories_count': self.stories_count,
+            'new_users_count': self.new_users_count,
+            'start_command_count': self.start_command_count,
+            'profile_completed_count': self.profile_completed_count,
+            'created_at': self.created_at.isoformat() if self.created_at else '',
+            'updated_at': self.updated_at.isoformat() if self.updated_at else '',
+        }
 

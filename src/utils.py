@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class AntifloodManager:
-    """Менеджер антифлуда: не чаще 1 генерации/15 секунд и не более 15 басен в сутки на пользователя."""
+    """Менеджер антифлуда: не чаще 1 генерации/15 секунд и не более 15 сказок в сутки на пользователя."""
     
     def __init__(self, cooldown_seconds: int = 15, daily_limit: int = 15):
         self.cooldown_seconds = cooldown_seconds
@@ -63,9 +63,9 @@ class AntifloodManager:
                 else:
                     time_str = f"{remaining_minutes} мин."
                 
-                return False, f"Достигнут лимит: {self.daily_limit} басен в сутки. Попробуйте через {time_str}."
+                return False, f"Достигнут лимит: {self.daily_limit} сказок в сутки. Попробуйте через {time_str}."
             else:
-                return False, f"Достигнут лимит: {self.daily_limit} басен в сутки. Попробуйте завтра."
+                return False, f"Достигнут лимит: {self.daily_limit} сказок в сутки. Попробуйте завтра."
         
         # Проверяем кулдаун между генерациями
         last_time = self.last_generation.get(user_id, 0)

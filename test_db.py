@@ -87,12 +87,12 @@ def test_connection():
             return False
         
         # Save story
-        print("\nТестирую сохранение басни...")
+        print("\nТестирую сохранение сказки...")
         success = save_story(test_user_id, "Test story text", model='test')
         if success:
-            print("✓ Басня сохранена")
+            print("✓ Сказка сохранена")
         else:
-            print("❌ Ошибка сохранения басни")
+            print("❌ Ошибка сохранения сказки")
             return False
         
         # Cleanup test user

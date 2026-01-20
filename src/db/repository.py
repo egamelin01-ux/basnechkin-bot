@@ -1,12 +1,12 @@
 """Database repository functions."""
 import logging
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, date
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 
 from .session import SessionLocal
-from .models import User, Story, Context
+from .models import User, Story, Context, DailyStats
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ def save_story(telegram_id: int, story_text: str, model: str = 'deepseek') -> bo
         if user:
             user.story_total += 1
         else:
-            logger.warning(f"Пользователь {telegram_id} не найден при сохранении басни")
+            logger.warning(f"Пользователь {telegram_id} не найден при сохранении сказки")
             db.rollback()
             return False
         
@@ -176,11 +176,11 @@ def save_story(telegram_id: int, story_text: str, model: str = 'deepseek') -> bo
         _trim_stories(db, telegram_id, limit=5)
         
         db.commit()
-        logger.info(f"Басня сохранена для пользователя {telegram_id}")
+        logger.info(f"Сказка сохранена для пользователя {telegram_id}")
         return True
     except Exception as e:
         db.rollback()
-        logger.error(f"Ошибка сохранения басни для пользователя {telegram_id}: {e}")
+        logger.error(f"Ошибка сохранения сказки для пользователя {telegram_id}: {e}")
         return False
     finally:
         db.close()
@@ -202,9 +202,9 @@ def _trim_stories(db: Session, telegram_id: int, limit: int = 5):
             stories_to_delete = stories[limit:]
             for story in stories_to_delete:
                 db.delete(story)
-            logger.info(f"Помечено к удалению {len(stories_to_delete)} старых басен для пользователя {telegram_id}")
+            logger.info(f"Помечено к удалению {len(stories_to_delete)} старых сказок для пользователя {telegram_id}")
     except Exception as e:
-        logger.error(f"Ошибка trim басен для пользователя {telegram_id}: {e}")
+        logger.error(f"Ошибка trim сказок для пользователя {telegram_id}: {e}")
         raise
 
 
@@ -230,7 +230,7 @@ def get_last_stories(telegram_id: int, limit: int = 5) -> List[Dict[str, Any]]:
             for story in stories
         ]
     except Exception as e:
-        logger.error(f"Ошибка получения басен для пользователя {telegram_id}: {e}")
+        logger.error(f"Ошибка получения сказок для пользователя {telegram_id}: {e}")
         return []
     finally:
         db.close()
@@ -329,6 +329,118 @@ def delete_user_profile(telegram_id: int) -> bool:
         db.rollback()
         logger.error(f"Ошибка удаления профиля пользователя {telegram_id}: {e}")
         return False
+    finally:
+        db.close()
+
+
+# ==================== Daily Statistics ====================
+
+def increment_daily_stat(stat_type: str, increment: int = 1, target_date: Optional[date] = None) -> bool:
+    """
+    Increment daily statistic counter.
+    stat_type can be: 'stories', 'new_users', 'start_command', 'profile_completed'
+    Returns True on success, False on error.
+    """
+    if target_date is None:
+        target_date = datetime.utcnow().date()
+    
+    db = SessionLocal()
+    try:
+        # Get or create daily stats
+        stats = db.query(DailyStats).filter(DailyStats.date == target_date).first()
+        
+        if not stats:
+            stats = DailyStats(
+                date=target_date,
+                stories_count=0,
+                new_users_count=0,
+                start_command_count=0,
+                profile_completed_count=0
+            )
+            db.add(stats)
+        
+        # Increment the appropriate counter
+        if stat_type == 'stories':
+            stats.stories_count += increment
+        elif stat_type == 'new_users':
+            stats.new_users_count += increment
+        elif stat_type == 'start_command':
+            stats.start_command_count += increment
+        elif stat_type == 'profile_completed':
+            stats.profile_completed_count += increment
+        else:
+            logger.warning(f"Неизвестный тип статистики: {stat_type}")
+            db.rollback()
+            return False
+        
+        stats.updated_at = datetime.utcnow()
+        db.commit()
+        logger.info(f"Статистика обновлена: {stat_type} +{increment} для {target_date}")
+        return True
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Ошибка обновления статистики {stat_type}: {e}")
+        return False
+    finally:
+        db.close()
+
+
+def get_daily_stats(start_date: Optional[date] = None, end_date: Optional[date] = None, limit: int = 30) -> List[Dict[str, Any]]:
+    """
+    Get daily statistics for date range.
+    If dates not provided, returns last N days.
+    Returns list of stats dicts ordered by date DESC.
+    """
+    db = SessionLocal()
+    try:
+        query = db.query(DailyStats)
+        
+        if start_date:
+            query = query.filter(DailyStats.date >= start_date)
+        if end_date:
+            query = query.filter(DailyStats.date <= end_date)
+        
+        stats = query.order_by(desc(DailyStats.date)).limit(limit).all()
+        
+        return [stat.to_dict() for stat in stats]
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        return []
+    finally:
+        db.close()
+
+
+def get_daily_stats_summary() -> Dict[str, Any]:
+    """
+    Get summary statistics across all days.
+    Returns dict with total counts.
+    """
+    db = SessionLocal()
+    try:
+        result = db.query(
+            func.sum(DailyStats.stories_count).label('total_stories'),
+            func.sum(DailyStats.new_users_count).label('total_new_users'),
+            func.sum(DailyStats.start_command_count).label('total_start_commands'),
+            func.sum(DailyStats.profile_completed_count).label('total_profiles_completed'),
+            func.count(DailyStats.date).label('days_count')
+        ).first()
+        
+        return {
+            'total_stories': result.total_stories or 0,
+            'total_new_users': result.total_new_users or 0,
+            'total_start_commands': result.total_start_commands or 0,
+            'total_profiles_completed': result.total_profiles_completed or 0,
+            'days_count': result.days_count or 0,
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения сводной статистики: {e}")
+        return {
+            'total_stories': 0,
+            'total_new_users': 0,
+            'total_start_commands': 0,
+            'total_profiles_completed': 0,
+            'days_count': 0,
+        }
     finally:
         db.close()
 

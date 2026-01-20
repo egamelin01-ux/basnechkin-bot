@@ -1,4 +1,4 @@
-"""Работа с Google Sheets: профили пользователей и истории басен."""
+"""Работа с Google Sheets: профили пользователей и истории сказок."""
 import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -199,7 +199,7 @@ class GoogleSheetsClient:
     def delete_user_profile(self, user_id: int) -> bool:
         """
         Удаляет профиль пользователя из листа Users.
-        Также удаляет все басни пользователя из листа Stories.
+        Также удаляет все сказки пользователя из листа Stories.
         """
         try:
             # Получаем sheet_id для Users
@@ -239,7 +239,7 @@ class GoogleSheetsClient:
                 }
             }]
             
-            # Удаляем все басни пользователя из Stories
+            # Удаляем все сказки пользователя из Stories
             stories_sheet_id = self._get_sheet_id('Stories')
             if stories_sheet_id:
                 stories_range = 'Stories!A2:B'
@@ -278,7 +278,7 @@ class GoogleSheetsClient:
                     body=body
                 ).execute()
                 
-                logger.info(f"Профиль пользователя {user_id} и все его басни удалены")
+                logger.info(f"Профиль пользователя {user_id} и все его сказки удалены")
                 return True
             else:
                 return False
@@ -404,7 +404,7 @@ class GoogleSheetsClient:
         model: str = 'deepseek'
     ) -> bool:
         """
-        Сохраняет басню в лист Stories и выполняет trim до последних 5 записей.
+        Сохраняет сказку в лист Stories и выполняет trim до последних 5 записей.
         """
         try:
             # Генерируем уникальный ID для истории
@@ -423,10 +423,10 @@ class GoogleSheetsClient:
                 body=body
             ).execute()
             
-            logger.info(f"Басня сохранена для пользователя {user_id}")
+            logger.info(f"Сказка сохранена для пользователя {user_id}")
             self.increment_story_total(user_id)
 
-            # Увеличиваем счетчик всех басен
+            # Увеличиваем счетчик всех сказок
             self.increment_story_total(user_id)
 
             # Выполняем trim до последних 5 записей
@@ -435,12 +435,12 @@ class GoogleSheetsClient:
             return True
 
         except Exception as e:
-            logger.error(f"Ошибка сохранения басни для пользователя {user_id}: {e}")
+            logger.error(f"Ошибка сохранения сказки для пользователя {user_id}: {e}")
             return False
     
     def _trim_stories(self, user_id: int):
         """
-        Оставляет только последние 5 басен для пользователя.
+        Оставляет только последние 5 сказок для пользователя.
         Удаляет самые старые записи.
         """
         try:
@@ -503,8 +503,8 @@ class GoogleSheetsClient:
                         body=body
                     ).execute()
                     
-                    logger.info(f"Удалено {len(requests)} старых басен для пользователя {user_id}")
+                    logger.info(f"Удалено {len(requests)} старых сказок для пользователя {user_id}")
             
         except Exception as e:
-            logger.error(f"Ошибка trim басен для пользователя {user_id}: {e}")
+            logger.error(f"Ошибка trim сказок для пользователя {user_id}: {e}")
 
