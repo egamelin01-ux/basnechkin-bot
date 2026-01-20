@@ -1,5 +1,5 @@
 """SQLAlchemy ORM models."""
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index, BigInteger
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -10,7 +10,7 @@ class User(Base):
     """User model."""
     __tablename__ = "users"
 
-    telegram_id = Column(Integer, primary_key=True, index=True)
+    telegram_id = Column(BigInteger, primary_key=True, index=True)
     username = Column(String(255), nullable=True)
     child_names = Column(Text, nullable=True)
     age = Column(String(50), nullable=True)
@@ -53,7 +53,7 @@ class Story(Base):
     __tablename__ = "stories"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
     text = Column(Text, nullable=False)
     model = Column(String(50), default='deepseek', nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -71,7 +71,7 @@ class Context(Base):
     __tablename__ = "contexts"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
     kind = Column(String(20), nullable=False, index=True)  # 'active' or 'archived'
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

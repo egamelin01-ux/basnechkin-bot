@@ -2,12 +2,15 @@
 from logging.config import fileConfig
 import os
 import sys
+from pathlib import Path
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 from alembic import context
 
-# Add src to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# Add project root and src to path for imports
+project_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "src"))
 
 # Import models and session
 from src.db.session import Base, engine

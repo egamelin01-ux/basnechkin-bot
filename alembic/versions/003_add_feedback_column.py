@@ -17,9 +17,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column('users', sa.Column('feedback', sa.Text(), nullable=True))
+    # Make idempotent for environments where column was added manually
+    op.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS feedback TEXT")
 
 
 def downgrade() -> None:
-    op.drop_column('users', 'feedback')
+    op.execute("ALTER TABLE users DROP COLUMN IF EXISTS feedback")
 

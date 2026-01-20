@@ -1,10 +1,13 @@
 """Основной файл Telegram-бота 'Баснописец'."""
 import logging
+import asyncio
 import random
+from contextlib import asynccontextmanager
 from typing import Dict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -44,14 +47,48 @@ ASKING_NEW_DILEMMA, ASKING_TRAITS_ADDITION = range(4, 6)
 # Состояния FSM для пожеланий
 ASKING_WISHES, ASKING_WISHES_EDIT = range(6, 8)
 
-# Состояния FSM для отзывов
-ASKING_FEEDBACK = range(8, 9)[0]
 
 # Инициализация компонентов
 agent_router = AgentRouter()
 deepseek_client = DeepSeekClient()
 antiflood = AntifloodManager(cooldown_seconds=ANTIFLOOD_SECONDS, daily_limit=DAILY_STORY_LIMIT)
+
+
+async def run_blocking(func, *args, **kwargs):
+    """Запускает блокирующую функцию в отдельном потоке."""
+    return await asyncio.to_thread(func, *args, **kwargs)
 profile_cache = ProfileCache()
+
+
+@asynccontextmanager
+async def typing_indicator(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, interval: float = 4.0):
+    """Периодически отправляет статус 'Typing' пока выполняется долгий этап."""
+    if not chat_id:
+        yield
+        return
+    
+    stop_event = asyncio.Event()
+    
+    async def _send_typing():
+        while not stop_event.is_set():
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            except Exception as e:
+                logger.debug(f"Не удалось отправить typing: {e}")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                continue
+    
+    task = asyncio.create_task(_send_typing())
+    try:
+        yield
+    finally:
+        stop_event.set()
+        try:
+            await task
+        except Exception as e:
+            logger.debug(f"Ошибка при остановке typing: {e}")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,7 +200,12 @@ async def handle_situation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Понятно. Сейчас я напишу для вас первую басню."
         )
         # Генерируем обычную басню
-        await generate_and_send_story(update, context, "Напиши первую басню-знакомство с ребенком.")
+        await generate_and_send_story(
+            update,
+            context,
+            "Напиши первую басню-знакомство с ребенком.",
+            skip_profile_update=True
+        )
         return ConversationHandler.END
     else:
         # Сохраняем ситуацию в context_active
@@ -180,9 +222,10 @@ async def handle_situation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             # Генерируем басню с учетом ситуации
             await generate_and_send_story(
-                update, 
-                context, 
-                f"Напиши первую басню-знакомство с ребенком, которая разбирает ситуацию: {answer}"
+                update,
+                context,
+                f"Напиши первую басню-знакомство с ребенком, которая разбирает ситуацию: {answer}",
+                skip_profile_update=True
             )
         else:
             await update.message.reply_text(
@@ -202,35 +245,36 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /reset - сброс профиля и начало заново."""
     user_id = update.effective_user.id
     
-    # Проверяем, есть ли профиль
+    await reset_profile_flow(user_id, context, update.message.reply_text)
+    
+    return ConversationHandler.END
+
+
+async def reset_profile_flow(user_id: int, context: ContextTypes.DEFAULT_TYPE, reply_fn):
+    """Общий сброс профиля для команды и кнопки меню."""
     profile = get_user(user_id)
     if not profile:
-        await update.message.reply_text(
+        await reply_fn(
             "У вас нет сохраненного профиля. Используйте /start для регистрации."
         )
-        return ConversationHandler.END
+        return False
     
-    # Удаляем профиль и все басни
     success = delete_user_profile(user_id)
     
     if success:
-        # Инвалидируем кэш
         profile_cache.invalidate(user_id)
-        
-        # Очищаем данные из context
         context.user_data.clear()
-        
-        await update.message.reply_text(
+        await reply_fn(
             "✅ Профиль и все басни удалены.\n\n"
             "Теперь вы можете начать заново. Используйте /start для регистрации."
         )
         logger.info(f"Пользователь {user_id} сбросил профиль")
-    else:
-        await update.message.reply_text(
-            "❌ Произошла ошибка при удалении профиля. Попробуйте позже."
-        )
+        return True
     
-    return ConversationHandler.END
+    await reply_fn(
+        "❌ Произошла ошибка при удалении профиля. Попробуйте позже."
+    )
+    return False
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -334,21 +378,9 @@ def create_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(f"➡️{nbsp}Дополнить характер", callback_data="story_add_traits")],
         [InlineKeyboardButton(f"➡️{nbsp}Пожелания к басне", callback_data="story_wishes")],
-        [InlineKeyboardButton(f"➡️{nbsp}Отзывы", callback_data="feedback")],
         [InlineKeyboardButton(f"➡️{nbsp}Польза Басенника", callback_data="about_benefits")],
+        [InlineKeyboardButton(f"➡️{nbsp}Сбросить профиль", callback_data="reset_profile")],
         [InlineKeyboardButton(f"⬅️{nbsp}Назад", callback_data="menu_back")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-def create_feedback_stars_keyboard() -> InlineKeyboardMarkup:
-    """Создает клавиатуру с кнопками звездочек для отзыва."""
-    keyboard = [
-        [
-            InlineKeyboardButton("⭐", callback_data="feedback_star_1"),
-            InlineKeyboardButton("⭐⭐", callback_data="feedback_star_2"),
-            InlineKeyboardButton("⭐⭐⭐", callback_data="feedback_star_3")
-        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -371,7 +403,11 @@ async def show_story_options(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик callback для кнопок выбора басни."""
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest as e:
+        # Callback мог устареть (например, при долгой обработке)
+        logger.info(f"Не удалось ответить на callback: {e}")
     
     user_id = update.effective_user.id
     callback_data = query.data
@@ -421,7 +457,13 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
             
             # Генерируем вопросы через роутер
             await query.message.reply_text("💭 Формирую вопросы для размышлений...")
-            questions = agent_router.generate_reflection_questions(last_story_text, profile)
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            async with typing_indicator(context, chat_id):
+                questions = await run_blocking(
+                    agent_router.generate_reflection_questions,
+                    last_story_text,
+                    profile
+                )
             
             # Формируем сообщение с вопросами
             message_text = "<b>Для развития у ребенка рефлексии и закрепления морали из предыдущей сказки рекомендуется задать чаду вопросы:</b>\n\n"
@@ -482,6 +524,10 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "menu":
         # Показываем меню с дополнительными опциями
         await query.message.reply_text("•", reply_markup=create_menu_keyboard())
+        return ConversationHandler.END
+    
+    elif callback_data == "reset_profile":
+        await reset_profile_flow(user_id, context, query.message.reply_text)
         return ConversationHandler.END
     
     elif callback_data == "menu_back":
@@ -616,28 +662,6 @@ async def handle_story_callback(update: Update, context: ContextTypes.DEFAULT_TY
         # Отмена - показываем второе меню
         await query.message.reply_text("•", reply_markup=create_menu_keyboard())
         return ConversationHandler.END
-    
-    elif callback_data == "feedback":
-        # Показываем интерфейс отзыва
-        text = "Оставьте отзыв, чтобы мы могли стать лучше"
-        await query.message.reply_text(text, reply_markup=create_feedback_stars_keyboard())
-        return ConversationHandler.END
-    
-    elif callback_data.startswith("feedback_star_"):
-        # Пользователь выбрал количество звезд
-        try:
-            stars = int(callback_data.split("_")[-1])
-            context.user_data['feedback_stars'] = stars
-            await query.message.reply_text(
-                f"Вы выбрали {stars} {'звезду' if stars == 1 else 'звезды' if stars == 2 else 'звезд'}.\n\n"
-                "Напишите ваш отзыв :"
-            )
-            context.user_data['waiting_for'] = 'feedback'
-            return ASKING_FEEDBACK
-        except (ValueError, IndexError):
-            logger.error(f"Ошибка парсинга количества звезд из callback_data: {callback_data}")
-            await query.message.reply_text("Произошла ошибка. Попробуйте еще раз.")
-            return ConversationHandler.END
     
     elif callback_data == "about_benefits":
         # Показываем информацию о пользе Басенника
@@ -807,57 +831,10 @@ async def handle_wishes_edit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текста отзыва."""
-    user_id = update.effective_user.id
-    feedback_text = update.message.text.strip()
-    
-    # Получаем количество звезд из context
-    stars = context.user_data.get('feedback_stars')
-    
-    if not stars:
-        # Если по какой-то причине нет звезд, просим выбрать заново
-        await update.message.reply_text(
-            "Пожалуйста, сначала выберите количество звезд."
-        )
-        return ConversationHandler.END
-    
-    # Проверяем, если пользователь отправил /skip
-    if feedback_text.lower() in ['/skip', 'skip', 'пропустить']:
-        feedback_text = ''
-    
-    # Формируем финальный текст отзыва
-    if feedback_text:
-        feedback_value = f"{stars} + {feedback_text}"
-    else:
-        feedback_value = str(stars)
-    
-    # Сохраняем отзыв в БД
-    success = update_user_fields(user_id, feedback=feedback_value)
-    if not success:
-        await update.message.reply_text(
-            "Произошла ошибка при сохранении отзыва. Попробуйте позже."
-        )
-        return ConversationHandler.END
-    
-    # Инвалидируем кэш
-    profile_cache.invalidate(user_id)
-    
-    # Очищаем временные данные
-    context.user_data.pop('feedback_stars', None)
-    context.user_data.pop('waiting_for', None)
-    
-    await update.message.reply_text("✅ Спасибо за ваш отзыв!")
-    
-    # Показываем меню
-    await update.message.reply_text("•", reply_markup=create_menu_keyboard())
-    
-    return ConversationHandler.END
-
-
 async def handle_traits_addition(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ответа на вопрос о дополнении характера."""
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id if update.effective_chat else None
     logger.info(f"Получен ответ на дополнение характера от пользователя {user_id}")
     user_message = update.message.text.strip()
     
@@ -884,7 +861,12 @@ async def handle_traits_addition(update: Update, context: ContextTypes.DEFAULT_T
         try:
             # Формируем сообщение с явным указанием на дополнение
             addition_message = f"Добавь к текущему характеру: {user_message}"
-            agent_response = agent_router.process_profile_update(addition_message, profile)
+            async with typing_indicator(context, chat_id):
+                agent_response = await run_blocking(
+                    agent_router.process_profile_update,
+                    addition_message,
+                    profile
+                )
             logger.info(f"Agent 1 обработал запрос на дополнение характера для пользователя {user_id}")
         except Exception as e:
             logger.error(f"Ошибка при вызове Agent 1 для дополнения характера: {e}", exc_info=True)
@@ -962,22 +944,25 @@ async def generate_story_with_new_dilemma(
     dilemma: str
 ):
     """Генерирует басню с новой дилеммой."""
-    try:
-        # Используем агент-роутер для формирования промпта
-        agent_response = agent_router.process_story_request(
-            request_type="new_dilemma",
-            user_message=dilemma,
-            user_profile=profile
-        )
-        
-        await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
-    except Exception as e:
-        logger.error(f"Ошибка при генерации басни с новой дилеммой: {e}", exc_info=True)
-        message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
-        if message_target:
-            await message_target.reply_text(
-                "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    async with typing_indicator(context, chat_id):
+        try:
+            # Используем агент-роутер для формирования промпта
+            agent_response = await run_blocking(
+                agent_router.process_story_request,
+                request_type="new_dilemma",
+                user_message=dilemma,
+                user_profile=profile
             )
+            
+            await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
+        except Exception as e:
+            logger.error(f"Ошибка при генерации басни с новой дилеммой: {e}", exc_info=True)
+            message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
+            if message_target:
+                await message_target.reply_text(
+                    "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+                )
 
 
 async def generate_story_with_random_moral(
@@ -988,60 +973,63 @@ async def generate_story_with_random_moral(
 ):
     """Генерирует басню со случайной моралью."""
     message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
+    chat_id = update.effective_chat.id if update.effective_chat else None
     
-    try:
-        # Проверяем, что profile не None и не пустой
-        if not profile:
-            logger.error(f"Профиль пустой или None для пользователя {user_id}")
-            if message_target:
-                await message_target.reply_text(
-                    "❌ Ошибка: профиль не найден. Используйте /start для регистрации."
-                )
-            return
-        
-        # Используем агент-роутер для формирования промпта
-        agent_response = agent_router.process_story_request(
-            request_type="random_moral",
-            user_message="",
-            user_profile=profile
-        )
-        
-        # Проверяем, что agent_response содержит нужные данные
-        if not agent_response or "deepseek_user_prompt" not in agent_response:
-            logger.error(f"Некорректный ответ от agent_router для пользователя {user_id}: {agent_response}")
-            if message_target:
-                await message_target.reply_text(
-                    "❌ Ошибка при формировании запроса. Попробуйте позже."
-                )
-            return
-        
-        # Сохраняем выбранную мораль в context_active
-        if "moral" in agent_response:
-            moral = agent_response["moral"]
-            logger.info(f"Получена мораль для сохранения в context_active для пользователя {user_id}: {moral}")
-            success = update_user_fields(user_id, context_active=moral)
-            if success:
-                # Инвалидируем кэш и обновляем профиль
-                profile_cache.invalidate(user_id)
-                updated_profile = get_user(user_id)
-                if updated_profile:
-                    profile_cache.set(user_id, updated_profile)
-                    profile = updated_profile
-                    logger.info(f"Сохранена случайная мораль в context_active для пользователя {user_id}: {moral}. Новый context_active: {updated_profile.get('context_active', 'не найден')}")
-                else:
-                    logger.warning(f"Не удалось получить обновленный профиль для пользователя {user_id}")
-            else:
-                logger.warning(f"Не удалось сохранить мораль в context_active для пользователя {user_id}")
-        else:
-            logger.error(f"В ответе agent_router отсутствует поле 'moral' для пользователя {user_id}. Ответ: {agent_response}")
-        
-        await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
-    except Exception as e:
-        logger.error(f"Ошибка при генерации басни со случайной моралью: {e}", exc_info=True)
-        if message_target:
-            await message_target.reply_text(
-                "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+    async with typing_indicator(context, chat_id):
+        try:
+            # Проверяем, что profile не None и не пустой
+            if not profile:
+                logger.error(f"Профиль пустой или None для пользователя {user_id}")
+                if message_target:
+                    await message_target.reply_text(
+                        "❌ Ошибка: профиль не найден. Используйте /start для регистрации."
+                    )
+                return
+            
+            # Используем агент-роутер для формирования промпта
+            agent_response = await run_blocking(
+                agent_router.process_story_request,
+                request_type="random_moral",
+                user_message="",
+                user_profile=profile
             )
+            
+            # Проверяем, что agent_response содержит нужные данные
+            if not agent_response or "deepseek_user_prompt" not in agent_response:
+                logger.error(f"Некорректный ответ от agent_router для пользователя {user_id}: {agent_response}")
+                if message_target:
+                    await message_target.reply_text(
+                        "❌ Ошибка при формировании запроса. Попробуйте позже."
+                    )
+                return
+            
+            # Сохраняем выбранную мораль в context_active
+            if "moral" in agent_response:
+                moral = agent_response["moral"]
+                logger.info(f"Получена мораль для сохранения в context_active для пользователя {user_id}: {moral}")
+                success = update_user_fields(user_id, context_active=moral)
+                if success:
+                    # Инвалидируем кэш и обновляем профиль
+                    profile_cache.invalidate(user_id)
+                    updated_profile = get_user(user_id)
+                    if updated_profile:
+                        profile_cache.set(user_id, updated_profile)
+                        profile = updated_profile
+                        logger.info(f"Сохранена случайная мораль в context_active для пользователя {user_id}: {moral}. Новый context_active: {updated_profile.get('context_active', 'не найден')}")
+                    else:
+                        logger.warning(f"Не удалось получить обновленный профиль для пользователя {user_id}")
+                else:
+                    logger.warning(f"Не удалось сохранить мораль в context_active для пользователя {user_id}")
+            else:
+                logger.error(f"В ответе agent_router отсутствует поле 'moral' для пользователя {user_id}. Ответ: {agent_response}")
+            
+            await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
+        except Exception as e:
+            logger.error(f"Ошибка при генерации басни со случайной моралью: {e}", exc_info=True)
+            if message_target:
+                await message_target.reply_text(
+                    "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+                )
 
 
 async def generate_story_with_previous_moral(
@@ -1052,22 +1040,25 @@ async def generate_story_with_previous_moral(
     context_active: str
 ):
     """Генерирует басню с прошлой моралью."""
-    try:
-        # Используем агент-роутер для формирования промпта
-        agent_response = agent_router.process_story_request(
-            request_type="previous_moral",
-            user_message=context_active,
-            user_profile=profile
-        )
-        
-        await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
-    except Exception as e:
-        logger.error(f"Ошибка при генерации басни с прошлой моралью: {e}", exc_info=True)
-        message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
-        if message_target:
-            await message_target.reply_text(
-                "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    async with typing_indicator(context, chat_id):
+        try:
+            # Используем агент-роутер для формирования промпта
+            agent_response = await run_blocking(
+                agent_router.process_story_request,
+                request_type="previous_moral",
+                user_message=context_active,
+                user_profile=profile
             )
+            
+            await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
+        except Exception as e:
+            logger.error(f"Ошибка при генерации басни с прошлой моралью: {e}", exc_info=True)
+            message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
+            if message_target:
+                await message_target.reply_text(
+                    "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+                )
 
 
 async def generate_story_with_wishes(
@@ -1078,23 +1069,26 @@ async def generate_story_with_wishes(
     wishes: str
 ):
     """Генерирует басню с учетом пожеланий."""
-    try:
-        # Используем агент-роутер для формирования промпта
-        # Передаем пожелания как user_message, чтобы агент учел их
-        agent_response = agent_router.process_story_request(
-            request_type="wishes",
-            user_message=f"Учти следующие пожелания при написании басни: {wishes}",
-            user_profile=profile
-        )
-        
-        await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
-    except Exception as e:
-        logger.error(f"Ошибка при генерации басни с пожеланиями: {e}", exc_info=True)
-        message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
-        if message_target:
-            await message_target.reply_text(
-                "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    async with typing_indicator(context, chat_id):
+        try:
+            # Используем агент-роутер для формирования промпта
+            # Передаем пожелания как user_message, чтобы агент учел их
+            agent_response = await run_blocking(
+                agent_router.process_story_request,
+                request_type="wishes",
+                user_message=f"Учти следующие пожелания при написании басни: {wishes}",
+                user_profile=profile
             )
+            
+            await generate_and_send_story_internal(update, context, user_id, profile, agent_response)
+        except Exception as e:
+            logger.error(f"Ошибка при генерации басни с пожеланиями: {e}", exc_info=True)
+            message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
+            if message_target:
+                await message_target.reply_text(
+                    "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+                )
 
 
 async def generate_story_with_updated_traits(
@@ -1106,22 +1100,25 @@ async def generate_story_with_updated_traits(
     status_msg = None
 ):
     """Генерирует басню с обновленным характером."""
-    try:
-        # Используем агент-роутер для формирования промпта
-        agent_response = agent_router.process_story_request(
-            request_type="add_traits",
-            user_message=user_message,
-            user_profile=profile
-        )
-        
-        await generate_and_send_story_internal(update, context, user_id, profile, agent_response, status_msg)
-    except Exception as e:
-        logger.error(f"Ошибка при генерации басни с обновленным характером: {e}", exc_info=True)
-        message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
-        if message_target:
-            await message_target.reply_text(
-                "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    async with typing_indicator(context, chat_id):
+        try:
+            # Используем агент-роутер для формирования промпта
+            agent_response = await run_blocking(
+                agent_router.process_story_request,
+                request_type="add_traits",
+                user_message=user_message,
+                user_profile=profile
             )
+            
+            await generate_and_send_story_internal(update, context, user_id, profile, agent_response, status_msg)
+        except Exception as e:
+            logger.error(f"Ошибка при генерации басни с обновленным характером: {e}", exc_info=True)
+            message_target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
+            if message_target:
+                await message_target.reply_text(
+                    "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+                )
 
 
 async def generate_and_send_story_internal(
@@ -1232,7 +1229,7 @@ async def generate_and_send_story_internal(
             logger.warning(f"Профиль не найден или некорректен для пользователя {user_id}, используем базовый промпт")
         
         logger.info(f"Генерирую басню через DeepSeek для пользователя {user_id}, длина промпта: {len(deepseek_prompt)}")
-        story_text = deepseek_client.generate_story(deepseek_prompt)
+        story_text = await run_blocking(deepseek_client.generate_story, deepseek_prompt)
         
         if not story_text:
             logger.error(f"DeepSeek вернул пустой ответ для пользователя {user_id}")
@@ -1277,7 +1274,13 @@ async def generate_and_send_story_internal(
                 await message_target.reply_text(chunk, parse_mode=ParseMode.HTML)
             else:
                 await message_target.reply_text(chunk, parse_mode=ParseMode.HTML)
-        
+
+        # Для случайной морали отправляем выбранную мораль отдельным сообщением
+        if request_type == "random_moral":
+            moral_text = (agent_response or {}).get("moral", "").strip()
+            if moral_text:
+                await message_target.reply_text(f'Мораль: "{moral_text}"')
+
         # Показываем кнопки выбора для следующей басни
         await show_story_options(update, context)
         
@@ -1312,72 +1315,94 @@ async def generate_and_send_story_internal(
 async def generate_and_send_story(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    user_message: str
+    user_message: str,
+    skip_profile_update: bool = False
 ):
     """Пишет басню и отправляет пользователю."""
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id if update.effective_chat else None
     
-    try:
-        # Загружаем профиль (из кэша или из БД)
-        profile = profile_cache.get(user_id)
-        if not profile:
-            profile = get_user(user_id)
-            if profile:
-                profile_cache.set(user_id, profile)
-        
-        if not profile:
-            await update.message.reply_text(
-                "Произошла ошибка при загрузке профиля. Используйте /start для повторной регистрации."
-            )
-            return
-        
-        # Отправляем индикатор генерации
-        status_msg = await update.message.reply_text("✒️ Пишу басню...")
-        
-        # Вызываем Agent 1
+    async with typing_indicator(context, chat_id):
         try:
-            agent_response = agent_router.process_message(user_message, profile)
-            logger.info(f"Agent 1 ответ получен для пользователя {user_id}")
-        except Exception as e:
-            logger.error(f"Ошибка при вызове Agent 1: {e}", exc_info=True)
-            await status_msg.edit_text(
-                "❌ Ошибка при обработке запроса. Попробуйте позже."
-            )
-            return
-        
-        # Обновляем профиль, если нужно
-        if agent_response.get("should_update_profile", False):
-            profile_patch = agent_response.get("profile_patch", {})
-            if profile_patch:
-                # Обновляем только существующие поля (last_user_message не используется в новой схеме БД)
-                success = update_user_fields(user_id, **profile_patch)
-                if success:
-                    # Инвалидируем кэш и обновляем
-                    profile_cache.invalidate(user_id)
-                    updated_profile = get_user(user_id)
-                    if updated_profile:
-                        profile_cache.set(user_id, updated_profile)
-                        profile = updated_profile
-        
-        # Используем внутреннюю функцию для генерации (передаем status_msg, чтобы оно удалилось после генерации)
-        agent_response['request_type'] = 'regular'  # Обычный запрос
-        await generate_and_send_story_internal(update, context, user_id, profile, agent_response, status_msg)
-        
-    except Exception as e:
-        logger.error(f"Ошибка при генерации басни для пользователя {user_id}: {e}", exc_info=True)
-        try:
-            if 'status_msg' in locals():
-                await status_msg.edit_text(
-                    "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+            # Загружаем профиль (из кэша или из БД)
+            profile = profile_cache.get(user_id)
+            if not profile:
+                profile = get_user(user_id)
+                if profile:
+                    profile_cache.set(user_id, profile)
+            
+            if not profile:
+                await update.message.reply_text(
+                    "Произошла ошибка при загрузке профиля. Используйте /start для повторной регистрации."
                 )
+                return
+            
+            # Отправляем индикатор генерации
+            status_msg = await update.message.reply_text("✒️ Пишу басню...")
+            
+            if skip_profile_update:
+                try:
+                    agent_response = await run_blocking(
+                        agent_router.process_story_request,
+                        "regular",
+                        user_message,
+                        profile
+                    )
+                    logger.info(f"Agent 1 промпт получен без обновления профиля для пользователя {user_id}")
+                except Exception as e:
+                    logger.error(f"Ошибка при формировании промпта: {e}", exc_info=True)
+                    await status_msg.edit_text(
+                        "❌ Ошибка при обработке запроса. Попробуйте позже."
+                    )
+                    return
             else:
+                # Вызываем Agent 1
+                try:
+                    agent_response = await run_blocking(
+                        agent_router.process_message,
+                        user_message,
+                        profile
+                    )
+                    logger.info(f"Agent 1 ответ получен для пользователя {user_id}")
+                except Exception as e:
+                    logger.error(f"Ошибка при вызове Agent 1: {e}", exc_info=True)
+                    await status_msg.edit_text(
+                        "❌ Ошибка при обработке запроса. Попробуйте позже."
+                    )
+                    return
+                
+                # Обновляем профиль, если нужно
+                if agent_response.get("should_update_profile", False):
+                    profile_patch = agent_response.get("profile_patch", {})
+                    if profile_patch:
+                        # Обновляем только существующие поля (last_user_message не используется в новой схеме БД)
+                        success = update_user_fields(user_id, **profile_patch)
+                        if success:
+                            # Инвалидируем кэш и обновляем
+                            profile_cache.invalidate(user_id)
+                            updated_profile = get_user(user_id)
+                            if updated_profile:
+                                profile_cache.set(user_id, updated_profile)
+                                profile = updated_profile
+            
+            # Используем внутреннюю функцию для генерации (передаем status_msg, чтобы оно удалилось после генерации)
+            await generate_and_send_story_internal(update, context, user_id, profile, agent_response, status_msg)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при генерации басни для пользователя {user_id}: {e}", exc_info=True)
+            try:
+                if 'status_msg' in locals():
+                    await status_msg.edit_text(
+                        "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+                    )
+                else:
+                    await update.message.reply_text(
+                        "❌ Произошла ошибка при генерации басни. Попробуйте позже."
+                    )
+            except:
                 await update.message.reply_text(
                     "❌ Произошла ошибка при генерации басни. Попробуйте позже."
                 )
-        except:
-            await update.message.reply_text(
-                "❌ Произошла ошибка при генерации басни. Попробуйте позже."
-            )
 
 
 def main():
@@ -1409,7 +1434,12 @@ def main():
         logger.warning("Продолжаю запуск, но возможны ошибки при сохранении профилей")
     
     # Создаем приложение
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
     
     # ConversationHandler для анкеты
     conv_handler = ConversationHandler(
@@ -1431,11 +1461,11 @@ def main():
     # Создаем CallbackQueryHandler для fallbacks, который может прервать ожидание
     callback_interrupt_handler = CallbackQueryHandler(
         handle_story_callback, 
-        pattern="^(story_|wishes_|traits_|menu|feedback|feedback_star_|about_|menu_back)"
+        pattern="^(story_|wishes_|traits_|menu|about_|menu_back|reset_profile)"
     )
     
     story_modify_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_story_callback, pattern="^(story_|wishes_|traits_|menu|feedback|feedback_star_|about_)")],
+        entry_points=[CallbackQueryHandler(handle_story_callback, pattern="^(story_|wishes_|traits_|menu|about_|reset_profile)")],
         states={
             ASKING_NEW_DILEMMA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_dilemma),
@@ -1451,10 +1481,6 @@ def main():
             ],
             ASKING_WISHES_EDIT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wishes_edit),
-                callback_interrupt_handler
-            ],
-            ASKING_FEEDBACK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_feedback),
                 callback_interrupt_handler
             ],
         },

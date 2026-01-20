@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import secrets
+import re
 from typing import Dict, Any, Optional, List
 from openai import OpenAI
 
@@ -306,21 +307,19 @@ class AgentRouter:
     def get_random_moral_by_age(self, age: str) -> str:
         """Получает случайную мораль на основе возраста."""
         # Определяем возрастную группу
-        age_str = str(age).strip().lower()
         age_group = None
+        age_value = self._get_average_age_value(age)
         
-        # Пытаемся извлечь число из возраста
-        try:
-            age_num = int(''.join(filter(str.isdigit, age_str)))
-            if age_num <= 5:
+        if age_value is not None:
+            if age_value <= 5:
                 age_group = "3-5"
-            elif age_num <= 8:
+            elif age_value <= 8:
                 age_group = "6-8"
-            elif age_num <= 12:
+            elif age_value <= 12:
                 age_group = "9-12"
             else:
                 age_group = "13+"
-        except:
+        else:
             # Если не удалось определить, используем среднюю группу
             age_group = "6-8"
         
@@ -549,23 +548,29 @@ class AgentRouter:
             logger.error(f"Ошибка при генерации вопросов для размышлений: {e}", exc_info=True)
             age_group = self._get_age_group(user_profile.get('age', '') if user_profile else '')
             return self._get_default_questions(age_group)
+
     
     def _get_age_group(self, age: str) -> str:
         """Определяет возрастную группу на основе возраста."""
-        age_str = str(age).strip().lower()
-        
-        try:
-            age_num = int(''.join(filter(str.isdigit, age_str)))
-            if age_num <= 5:
-                return "3-5"
-            elif age_num <= 8:
-                return "6-8"
-            elif age_num <= 12:
-                return "9-12"
-            else:
-                return "13+"
-        except:
+        age_value = self._get_average_age_value(age)
+        if age_value is None:
             return "6-8"  # Дефолтная группа
+        
+        if age_value <= 5:
+            return "3-5"
+        elif age_value <= 8:
+            return "6-8"
+        elif age_value <= 12:
+            return "9-12"
+        else:
+            return "13+"
+    
+    def _get_average_age_value(self, age: str) -> Optional[float]:
+        """Возвращает средний возраст, если указано несколько чисел."""
+        age_numbers = [int(n) for n in re.findall(r"\d+", str(age))]
+        if not age_numbers:
+            return None
+        return sum(age_numbers) / len(age_numbers)
     
     def _get_age_specific_instructions(self, age_group: str) -> str:
         """Возвращает инструкции для генерации вопросов в зависимости от возрастной группы."""
@@ -634,6 +639,7 @@ class AgentRouter:
 - Правильно ли поступил герой? Почему?
 - Как бы ты поступил на месте героя?
 - Что случилось, когда герой не поделился?"""
+
     
     def _get_default_questions(self, age_group: str) -> List[str]:
         """Возвращает дефолтные вопросы в зависимости от возрастной группы."""
